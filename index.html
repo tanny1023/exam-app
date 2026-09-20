@@ -69,6 +69,10 @@ select{border:1px solid var(--line);background:var(--card);border-radius:10px;pa
 .wi .ans{color:var(--ok);font-size:.92rem}
 .toast{position:fixed;left:16px;right:16px;bottom:24px;max-width:600px;margin:0 auto;background:#1c2333;color:#fff;padding:12px 16px;border-radius:12px;z-index:9;white-space:pre-wrap;font-size:.95rem}
 .hint{color:var(--muted);font-size:.9rem;margin-top:6px}
+.task{border-color:var(--pri)}
+.task .big{font-size:1.25rem;font-weight:700}
+.task .go{min-height:56px;font-size:1.1rem}
+.streak{font-weight:700;color:#ea580c}
 </style>
 </head>
 <body>
@@ -290,7 +294,7 @@ const S = {
   screen: 'home',
   session: null,   // 進行中的作答
   result: null,    // 剛完成的結果
-  settings: Object.assign({ units: null, count: 20, random: true, mode: 'practice' }, store.get('exam.settings', {})),
+  settings: Object.assign({ units: null, count: 20, random: true, mode: 'practice', examDate: '2026-12-05' }, store.get('exam.settings', {})),
 };
 const Q = {};      // id → 題目
 
@@ -306,6 +310,53 @@ function record(q, ok) {
   if (!ok) w.add(q.id);
   else if (S.session && S.session.from === 'wrong') w.delete(q.id);
   store.set('exam.wrong', [...w]);
+  // 練習紀錄：做過哪些題、今天做了幾題
+  const seen = store.get('exam.seen', {});
+  seen[q.id] = (seen[q.id] || 0) + 1;
+  store.set('exam.seen', seen);
+  const daily = store.get('exam.daily', {}), day = dateStr();
+  daily[day] = (daily[day] || 0) + 1;
+  store.set('exam.daily', daily);
+}
+
+/* ---- 每日任務 ---- */
+function dateStr(d = new Date()) {
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+const daysBetween = (a, b) => Math.round((new Date(b + 'T00:00:00') - new Date(a + 'T00:00:00')) / 864e5);
+const fmtDur = sec => sec >= 60 ? `${Math.floor(sec / 60)} 分 ${sec % 60} 秒` : `${sec} 秒`;
+const fmtClock = sec => `${String(Math.floor(sec / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}`;
+
+function calcStreak(daily) {
+  const d = new Date();
+  if (!daily[dateStr(d)]) d.setDate(d.getDate() - 1);   // 今天還沒做不算中斷
+  let n = 0;
+  while (daily[dateStr(d)] > 0) { n++; d.setDate(d.getDate() - 1); }
+  return n;
+}
+
+const REVIEW_DAYS = 10;   // 考前最後幾天留給複習
+function taskInfo() {
+  const seen = store.get('exam.seen', {}), daily = store.get('exam.daily', {}), today = dateStr();
+  const unseen = S.bank.questions.filter(q => !seen[q.id]);
+  const left = daysBetween(today, S.settings.examDate);
+  let t = store.get('exam.target', null);
+  if (!t || t.date !== today) {           // 每天第一次打開時算好，一整天固定不變
+    const study = left - REVIEW_DAYS;
+    const target = !unseen.length || study < 1 ? 20 : Math.min(200, Math.max(10, Math.ceil(unseen.length / study)));
+    t = { date: today, target };
+    store.set('exam.target', t);
+  }
+  return { unseen: unseen.length, seenCount: S.bank.questions.length - unseen.length, left, target: t.target, done: daily[today] || 0, streak: calcStreak(daily) };
+}
+
+function startTask(n) {
+  const seen = store.get('exam.seen', {});
+  const all = S.bank.questions.map(q => q.id);
+  let ids = shuffle(all.filter(id => !seen[id])).slice(0, n);              // 先出沒做過的
+  if (ids.length < n) ids = ids.concat(shuffle([...getWrong()].filter(id => !ids.includes(id)))).slice(0, n);   // 不夠補錯題
+  if (ids.length < n) ids = ids.concat(shuffle(all.filter(id => !ids.includes(id)))).slice(0, n);              // 再不夠補其他
+  startSession(ids, 'practice', 'bank', true);
 }
 
 function setBank(bank) {
@@ -370,10 +421,37 @@ function go(screen, keepScroll) {
 }
 const $app = document.getElementById('app');
 
-function startSession(ids, mode, from) {
-  S.session = { ids, answers: {}, idx: 0, mode, from };
+function startSession(ids, mode, from, task) {
+  S.session = { ids, answers: {}, idx: 0, mode, from, task: !!task, elapsed: 0, away: 0, awaySec: 0 };
   persistSession();
   go('quiz');
+}
+
+/* ---- 今日任務卡片 ---- */
+function taskCard() {
+  const t = taskInfo(), pct = Math.min(100, Math.round(t.done / t.target * 100));
+  const reached = t.done >= t.target;
+  const dateInput = h('input', { type: 'date', value: S.settings.examDate, style: 'border:1px solid var(--line);background:var(--card);color:inherit;border-radius:8px;padding:4px 6px;font:inherit;font-size:.85rem' });
+  dateInput.addEventListener('change', () => {
+    if (!dateInput.value) return;
+    S.settings.examDate = dateInput.value;
+    store.del('exam.target');
+    saveSettings();
+    go('home', true);
+  });
+  const dayText = t.left > 0 ? `距離考試還有 ${t.left} 天` : t.left === 0 ? '今天考試，加油！' : '考試日期已過';
+  return h('div', { class: 'card task' },
+    h('div', { class: 'row between' },
+      h('div', { class: 'big' }, dayText),
+      t.streak > 0 ? h('div', { class: 'streak' }, `🔥 連續 ${t.streak} 天`) : null),
+    h('div', { class: 'sub' }, `已練習 ${t.seenCount} / ${S.bank.questions.length} 題（還沒做過 ${t.unseen} 題）`),
+    h('div', { style: 'margin-top:12px' },
+      h('div', { class: 'row between' }, h('span', {}, '今日目標'), h('b', {}, `${t.done} / ${t.target} 題`)),
+      h('div', { class: 'bar', style: 'margin:6px 0 0' }, h('i', { style: `width:${pct}%` }))),
+    reached ? h('div', { class: 'fb ok', style: 'margin-top:10px' }, '🎉 今天的目標達成了！想多做一組也可以。') : null,
+    h('button', { class: 'btn pri block go', type: 'button', style: 'margin-top:12px', onclick: () => startTask(10) }, reached ? '再做一組（10 題）' : '開始今日任務（10 題）'),
+    h('button', { class: 'btn block', type: 'button', style: 'margin-top:8px', onclick: () => startTask(5) }, '不想動？只做 5 題就好'),
+    h('div', { class: 'row', style: 'margin-top:10px' }, h('span', { class: 'hint', style: 'margin:0' }, '考試日期'), dateInput));
 }
 
 /* ---- 首頁 ---- */
@@ -432,6 +510,7 @@ function viewHome() {
     h('h1', {}, '題庫練習'),
     h('div', { class: 'sub' }, `${b.name}｜${b.questions.length} 題`),
     resume,
+    taskCard(),
     h('div', { class: 'card' },
       h('div', { class: 'row between' }, h('h2', { style: 'margin:0' }, '選擇單元'),
         h('div', { class: 'row' },
@@ -497,7 +576,7 @@ function viewQuiz() {
   return h('div', {},
     h('div', { class: 'row between' },
       h('button', { class: 'btn small', type: 'button', onclick: () => go('home') }, '‹ 離開'),
-      h('span', { class: 'sub' }, `第 ${s.idx + 1} / ${total} 題`),
+      h('span', { class: 'sub' }, `第 ${s.idx + 1} / ${total} 題　⏱ `, h('span', { id: 'clock' }, fmtClock(s.elapsed || 0))),
       practice ? h('span', { style: 'width:64px' }) : h('button', { class: 'btn small', type: 'button', onclick: () => finishSession(true) }, '交卷')),
     h('div', { class: 'bar' }, h('i', { style: `width:${(s.idx + 1) / total * 100}%` })),
     h('div', { class: 'card' },
@@ -522,7 +601,7 @@ function finishSession(confirmUnanswered) {
       if (T.isAnswered(q, s.answers[id])) record(q, T.isCorrect(q, s.answers[id]));
     }
   }
-  S.result = { ids: s.ids, answers: s.answers, mode: s.mode, from: s.from };
+  S.result = { ids: s.ids, answers: s.answers, mode: s.mode, from: s.from, task: s.task, elapsed: s.elapsed || 0, away: s.away || 0, awaySec: s.awaySec || 0 };
   S.session = null;
   persistSession();
   go('result');
@@ -558,14 +637,44 @@ function viewResult() {
     h('h1', {}, r.mode === 'exam' ? '測驗結果' : '練習結果'),
     h('div', { class: 'card' },
       h('div', { class: 'score' }, `${Math.round(right / total * 100)}%`),
-      h('div', { class: 'sub' }, `答對 ${right} / ${total} 題`)),
+      h('div', { class: 'sub' }, `答對 ${right} / ${total} 題　用時 ${fmtClock(r.elapsed)}`),
+      r.away > 0 ? h('div', { class: 'sub' }, `中途離開 ${r.away} 次，共 ${fmtDur(r.awaySec)}`) : (r.elapsed > 0 ? h('div', { class: 'sub' }, '✨ 全程專心，沒有離開') : null),
+      r.task ? (() => { const t = taskInfo(); return h('div', { style: 'margin-top:10px' }, `今日進度：${t.done} / ${t.target} 題` + (t.done >= t.target ? ' 🎉 目標達成' : '')); })() : null),
     h('div', { class: 'row' },
-      h('button', { class: 'btn pri grow', type: 'button', disabled: bad.length === 0, onclick: () => startSession(shuffle(bad.map(x => x.q.id)), r.mode, 'wrong') }, `重做答錯的（${bad.length}）`),
+      r.task ? h('button', { class: 'btn pri grow', type: 'button', onclick: () => startTask(10) }, '再來一組（10 題）') : null,
+      h('button', { class: r.task ? 'btn grow' : 'btn pri grow', type: 'button', disabled: bad.length === 0, onclick: () => startSession(shuffle(bad.map(x => x.q.id)), r.mode, 'wrong') }, `重做答錯的（${bad.length}）`),
       h('button', { class: 'btn grow', type: 'button', onclick: () => go('home') }, '回首頁')),
     h('div', { class: 'card' },
       h('div', { class: 'row between', style: 'margin-bottom:6px' }, h('h2', { style: 'margin:0' }, '題目檢討'), toggle),
       list));
 }
+
+/* ============================================================
+ * 專注偵測：計時（只算停留在 App 的時間）＋記錄離開次數
+ * ============================================================ */
+setInterval(() => {
+  const s = S.session;
+  if (S.screen !== 'quiz' || !s || document.hidden) return;
+  s.elapsed = (s.elapsed || 0) + 1;
+  const c = document.getElementById('clock');
+  if (c) c.textContent = fmtClock(s.elapsed);
+  if (s.elapsed % 5 === 0) persistSession();
+}, 1000);
+
+let hiddenAt = 0;
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { hiddenAt = Date.now(); return; }
+  const s = S.session;
+  if (!hiddenAt) return;
+  const sec = Math.round((Date.now() - hiddenAt) / 1000);
+  hiddenAt = 0;
+  if (S.screen === 'quiz' && s && sec >= 3) {
+    s.away = (s.away || 0) + 1;
+    s.awaySec = (s.awaySec || 0) + sec;
+    persistSession();
+    toast(`你剛離開了 ${fmtDur(sec)}。回來就好，繼續這一題！`);
+  }
+});
 
 /* ============================================================
  * 啟動
