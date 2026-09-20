@@ -69,6 +69,12 @@ select{border:1px solid var(--line);background:var(--card);border-radius:10px;pa
 .wi .ans{color:var(--ok);font-size:.92rem}
 .toast{position:fixed;left:16px;right:16px;bottom:24px;max-width:600px;margin:0 auto;background:#1c2333;color:#fff;padding:12px 16px;border-radius:12px;z-index:9;white-space:pre-wrap;font-size:.95rem}
 .hint{color:var(--muted);font-size:.9rem;margin-top:6px}
+.tools{gap:8px;margin-bottom:4px}
+.btn.on{background:var(--selbg);border-color:var(--pri)}
+.sg{border-radius:4px;-webkit-box-decoration-break:clone;box-decoration-break:clone}
+.hlmode .sg{cursor:pointer;border-bottom:1px dashed var(--muted)}
+.sg.mark{background:#ffc2dc;color:#1c2333}
+.reading{background:#ffe14d !important;color:#1c2333 !important;border-radius:6px;box-shadow:0 0 0 3px #ffe14d}
 .task{border-color:var(--pri)}
 .task .big{font-size:1.25rem;font-weight:700}
 .task .go{min-height:56px;font-size:1.1rem}
@@ -205,9 +211,11 @@ registerType('choice', {
         else if (ctx.value === L) cls += ' wrong';
       }
       return h('button', { class: cls, type: 'button', disabled: ctx.locked, onclick: () => ctx.onChange(L) },
-        h('span', { class: 'key' }, L), h('span', { class: 'txt' }, text));
+        h('span', { class: 'key' }, L), h('span', { class: 'txt', 'data-sp': 'o' + i }, text));
     }));
   },
+  // 念題時要唸的項目；key 對應畫面上 data-sp 的元素，念到時會亮螢光
+  speech: q => q.options.map((t, i) => ({ key: 'o' + i, text: `${'ABCD'[i]}，${t.replace(/[。.]$/, '')}` })),
   isAnswered: (q, v) => !!v,
   isCorrect: (q, v) => v === q.answer,
   fmt(q, v) {
@@ -294,7 +302,10 @@ const S = {
   screen: 'home',
   session: null,   // 進行中的作答
   result: null,    // 剛完成的結果
-  settings: Object.assign({ units: null, count: 20, random: true, mode: 'practice', examDate: '2026-12-05' }, store.get('exam.settings', {})),
+  settings: Object.assign({ units: null, count: 20, random: true, mode: 'practice', examDate: '2026-12-05', rate: 1, autoRead: false, hl: false }, store.get('exam.settings', {})),
+  marks: {},       // 自己畫的螢光筆：題目 id → 被標記的段落編號
+  speaking: false,
+  curKey: null,    // 目前正在念的段落
 };
 const Q = {};      // id → 題目
 
@@ -415,9 +426,14 @@ function pickExcel() {
  * ============================================================ */
 function go(screen, keepScroll) {
   S.screen = screen;
+  if (screen !== 'quiz' || !keepScroll) stopSpeak();   // 換題或離開作答畫面就停止念題
   const view = { home: viewHome, quiz: viewQuiz, result: viewResult }[screen];
   $app.replaceChildren(view());
   if (!keepScroll) window.scrollTo(0, 0);
+  if (screen === 'quiz') {
+    applyMark(false);
+    if (!keepScroll && S.settings.autoRead) setTimeout(() => { if (S.screen === 'quiz' && S.session) readQuestion(); }, 350);
+  }
 }
 const $app = document.getElementById('app');
 
@@ -543,6 +559,114 @@ function viewHome() {
   return node;
 }
 
+/* ---- 念題目 ＋ 螢光筆 ---- */
+const HAS_TTS = 'speechSynthesis' in window && 'SpeechSynthesisUtterance' in window;
+let ttsToken = 0;
+
+// 把題幹切成一小段一小段（依標點），念到哪段就亮哪段
+function splitStem(text) {
+  const out = [];
+  for (const p of text.split(/(?<=[，、；：？！。;?!\n])|(?<=[,:])(?!\d)|(?<=[^\d][,:])/)) {
+    if (!p.trim()) { if (out.length) out[out.length - 1] += p; continue; }
+    if (out.length && out[out.length - 1].replace(/\s/g, '').length < 6) out[out.length - 1] += p;
+    else out.push(p);
+  }
+  return out;
+}
+
+function stemNode(q) {
+  const marks = S.marks[q.id] || (S.marks[q.id] = new Set());
+  return h('p', { class: 'stem' + (S.settings.hl ? ' hlmode' : ''), id: 'stem' },
+    splitStem(q.stem).map((t, i) => {
+      const el = h('span', { class: 'sg' + (marks.has(i) ? ' mark' : ''), 'data-sp': 's' + i }, t);
+      el.addEventListener('click', () => {
+        if (!S.settings.hl) return;
+        marks.has(i) ? marks.delete(i) : marks.add(i);
+        el.classList.toggle('mark');
+      });
+      return el;
+    }));
+}
+
+function applyMark(scroll) {
+  document.querySelectorAll('.reading').forEach(e => e.classList.remove('reading'));
+  if (!S.speaking || !S.curKey) return;
+  const el = document.querySelector(`[data-sp="${S.curKey}"]`);
+  if (!el) return;
+  el.classList.add('reading');
+  if (scroll) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+
+function syncSpeakBtn() {
+  const b = document.getElementById('speakBtn');
+  if (b) { b.textContent = S.speaking ? '⏹ 停止' : '🔊 念題目'; b.classList.toggle('on', !!S.speaking); }
+}
+
+function stopSpeak() {
+  ttsToken++;
+  if (HAS_TTS) { try { speechSynthesis.cancel(); } catch (e) {} }
+  S.speaking = false;
+  S.curKey = null;
+  applyMark(false);
+  syncSpeakBtn();
+}
+
+// 一句一句念；每句開始時亮起對應的段落
+function speakItems(items) {
+  if (!HAS_TTS || !items.length) return;
+  stopSpeak();
+  const my = ++ttsToken;
+  S.speaking = true;
+  syncSpeakBtn();
+  let i = 0;
+  const next = () => {
+    if (my !== ttsToken) return;
+    if (i >= items.length) { S.speaking = false; S.curKey = null; applyMark(false); syncSpeakBtn(); return; }
+    const it = items[i++];
+    S.curKey = it.key;
+    applyMark(true);
+    const u = new SpeechSynthesisUtterance(it.text.trim());
+    u.lang = 'zh-TW';
+    u.rate = S.settings.rate;
+    const v = speechSynthesis.getVoices().find(x => /zh[-_]TW/i.test(x.lang)) || speechSynthesis.getVoices().find(x => /^zh/i.test(x.lang));
+    if (v) u.voice = v;
+    u.onend = next;
+    u.onerror = next;
+    speechSynthesis.speak(u);
+  };
+  setTimeout(() => { if (my === ttsToken) next(); }, 60);   // cancel() 後稍等一下再念，避免被吃掉
+}
+
+function readQuestion() {
+  const s = S.session;
+  if (!s) return;
+  const q = Q[s.ids[s.idx]], T = TYPES[q.type];
+  speakItems(splitStem(q.stem).map((t, i) => ({ key: 's' + i, text: t })).concat(T.speech ? T.speech(q) : []));
+}
+
+function readingTools() {
+  const RATES = [0.8, 1, 1.25, 1.5];
+  const toggle = (label, get, set) => {
+    const b = h('button', { class: 'btn small' + (get() ? ' on' : ''), type: 'button' });
+    const paint = () => { b.textContent = `${label}：${get() ? '開' : '關'}`; b.classList.toggle('on', get()); };
+    b.addEventListener('click', () => { set(!get()); saveSettings(); paint(); });
+    paint();
+    return b;
+  };
+  const rateBtn = h('button', { class: 'btn small', type: 'button' }, `速度 ${S.settings.rate}×`);
+  rateBtn.addEventListener('click', () => {
+    S.settings.rate = RATES[(RATES.indexOf(S.settings.rate) + 1) % RATES.length];
+    saveSettings();
+    rateBtn.textContent = `速度 ${S.settings.rate}×`;
+    if (S.speaking) readQuestion();   // 改速度就從頭重念
+  });
+  return h('div', { class: 'row tools' },
+    HAS_TTS ? h('button', { class: 'btn small', type: 'button', id: 'speakBtn', onclick: () => S.speaking ? stopSpeak() : readQuestion() }, '🔊 念題目') : null,
+    toggle('🖍 螢光筆', () => S.settings.hl, v => { S.settings.hl = v; const st = document.getElementById('stem'); if (st) st.classList.toggle('hlmode', v); }),
+    HAS_TTS ? rateBtn : null,
+    HAS_TTS ? toggle('自動念', () => S.settings.autoRead, v => { S.settings.autoRead = v; if (!v) stopSpeak(); }) : null);
+}
+
 /* ---- 作答 ---- */
 function viewQuiz() {
   const s = S.session;
@@ -557,9 +681,14 @@ function viewQuiz() {
     if (locked) return;
     if (!practice && val === s.answers[q.id] && T.deselectable !== false) delete s.answers[q.id];
     else s.answers[q.id] = val;
+    stopSpeak();
     if (practice) record(q, T.isCorrect(q, val));
     persistSession();
     go('quiz', true);
+    if (practice && S.settings.autoRead && T.isAnswered(q, val)) {
+      const ok = T.isCorrect(q, val);
+      speakItems([{ key: null, text: ok ? '答對了' : '答錯了，正確答案是 ' + T.fmtAnswer(q).replace(/^\(([A-Z])\)\s*/, '$1，') }]);
+    }
   };
 
   const goto = i => { s.idx = i; persistSession(); go('quiz'); };
@@ -579,9 +708,10 @@ function viewQuiz() {
       h('span', { class: 'sub' }, `第 ${s.idx + 1} / ${total} 題　⏱ `, h('span', { id: 'clock' }, fmtClock(s.elapsed || 0))),
       practice ? h('span', { style: 'width:64px' }) : h('button', { class: 'btn small', type: 'button', onclick: () => finishSession(true) }, '交卷')),
     h('div', { class: 'bar' }, h('i', { style: `width:${(s.idx + 1) / total * 100}%` })),
+    readingTools(),
     h('div', { class: 'card' },
       h('div', { class: 'tag' }, q.unit + (q.no ? `　#${q.no}` : '')),
-      h('p', { class: 'stem' }, q.stem),
+      stemNode(q),
       T.render(q, { value: v, revealed: practice && answered, locked, onChange }),
       feedback),
     h('div', { class: 'nav' },
@@ -663,7 +793,7 @@ setInterval(() => {
 
 let hiddenAt = 0;
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden) { hiddenAt = Date.now(); return; }
+  if (document.hidden) { hiddenAt = Date.now(); stopSpeak(); return; }
   const s = S.session;
   if (!hiddenAt) return;
   const sec = Math.round((Date.now() - hiddenAt) / 1000);
