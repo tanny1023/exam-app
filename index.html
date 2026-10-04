@@ -133,9 +133,16 @@ window.MNEMO={"1":"注意，這題要選不對的那個。建造費就是直接�
 
 </script>
 <script>
-// 雲端同步設定：貼上 Firebase 網頁應用程式的 firebaseConfig（這些是公開設定，不是密碼）。
-// 還沒設定就維持 null，App 會自動隱藏同步功能。
-window.FIREBASE_CONFIG = null;
+// 雲端同步設定：Firebase 網頁應用程式的 firebaseConfig（這些是公開設定，不是密碼；
+// 資料的安全性由 Firestore 規則保證：只有登入的本人能讀寫自己的資料）。
+window.FIREBASE_CONFIG = {
+  apiKey: "AIzaSyCEFFogOdmtZS0eHizhGhn1RXNoL27QoQ0",
+  authDomain: "exam-app-3471d.firebaseapp.com",
+  projectId: "exam-app-3471d",
+  storageBucket: "exam-app-3471d.firebasestorage.app",
+  messagingSenderId: "298501713150",
+  appId: "1:298501713150:web:5c525f0437a993e92949af"
+};
 
 </script>
 <script>
