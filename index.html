@@ -234,24 +234,30 @@ registerType('choice', {
     }
     return null;
   },
+  // 考試時選項會隨機換位置：perm[位置] = 原本的選項編號。畫面上的 A~D 照位置重新標，作答值存原本的字母
+  shuffleOK(q) {
+    // 「以上皆是」「以上皆非」或選項裡提到其他選項字母（例如「A和B」）的題目，換位置會變成錯的，所以不換
+    return !q.options.some(o => /以上/.test(o) || /(^|[^A-Za-z])[A-D]\s*[、，,和及與跟＋+]/.test(o) || /[（(][A-D][)）]/.test(o));
+  },
   render(q, ctx) {
-    return h('div', { class: 'opts' }, q.options.map((text, i) => {
-      const L = 'ABCD'[i];
+    const order = ctx.perm || [0, 1, 2, 3];
+    return h('div', { class: 'opts' }, order.map((oi, pos) => {
+      const V = 'ABCD'[oi];
       let cls = 'opt';
-      if (ctx.value === L) cls += ' sel';
+      if (ctx.value === V) cls += ' sel';
       if (ctx.revealed) {
-        if (L === q.answer) cls += ' right';
-        else if (ctx.value === L) cls += ' wrong';
+        if (V === q.answer) cls += ' right';
+        else if (ctx.value === V) cls += ' wrong';
       }
-      return h('button', { class: cls, type: 'button', disabled: ctx.locked, onclick: () => ctx.onChange(L) },
-        h('span', { class: 'key' }, L), h('span', { class: 'txt', 'data-sp': 'o' + i }, text));
+      return h('button', { class: cls, type: 'button', disabled: ctx.locked, onclick: () => ctx.onChange(V) },
+        h('span', { class: 'key' }, 'ABCD'[pos]), h('span', { class: 'txt', 'data-sp': 'o' + pos }, q.options[oi]));
     }));
   },
   // 預習畫面：列出四個選項，標出正確答案
   study: q => h('div', { class: 'sopts' }, q.options.map((t, i) =>
     h('div', { class: 'sopt' + ('ABCD'[i] === q.answer ? ' right' : '') }, h('b', {}, 'ABCD'[i]), h('span', {}, t)))),
   // 念題時要唸的項目；key 對應畫面上 data-sp 的元素，念到時會亮螢光
-  speech: q => q.options.map((t, i) => ({ key: 'o' + i, text: forSpeech(`${'ABCD'[i]}，${t.replace(/[。.]$/, '')}`) })),
+  speech: (q, perm) => (perm || [0, 1, 2, 3]).map((oi, pos) => ({ key: 'o' + pos, text: forSpeech(`${'ABCD'[pos]}，${q.options[oi].replace(/[。.]$/, '')}`) })),
   // 答案是「以上皆是」「以上皆非」或數字組合時，把內容一項一項說出來
   answerNote(q) {
     const clean = t => t.replace(/[。.]\s*$/, '').trim();
@@ -561,6 +567,10 @@ const $app = document.getElementById('app');
 
 function startSession(ids, mode, from, task, limit) {
   S.session = { ids, answers: {}, idx: 0, mode, from, task: !!task, limit: limit || 0, elapsed: 0, away: 0, awaySec: 0 };
+  if (mode === 'exam') {   // 只有考試才隨機換選項順序；練習與預習維持 Excel 原本的順序
+    S.session.perm = {};
+    for (const id of ids) { const T = TYPES[Q[id].type]; if (T.shuffleOK && T.shuffleOK(Q[id])) S.session.perm[id] = shuffle([0, 1, 2, 3]); }
+  }
   persistSession();
   go('quiz');
 }
@@ -954,7 +964,7 @@ function readQuestion() {
   const s = S.session;
   if (!s) return;
   const q = Q[s.ids[s.idx]], T = TYPES[q.type];
-  speakItems(splitStem(q.stem).map((t, i) => ({ key: 's' + i, text: forSpeech(t) })).concat(T.speech ? T.speech(q) : []));
+  speakItems(splitStem(q.stem).map((t, i) => ({ key: 's' + i, text: forSpeech(t) })).concat(T.speech ? T.speech(q, s.perm && s.perm[q.id]) : []));
 }
 
 function readingTools() {
@@ -1033,7 +1043,7 @@ function viewQuiz() {
     h('div', { class: 'card' },
       h('div', { class: 'tag' }, q.unit + (q.no ? `　#${q.no}` : '')),
       stemNode(q),
-      T.render(q, { value: v, revealed: practice && answered, locked, onChange }),
+      T.render(q, { value: v, revealed: practice && answered, locked, onChange, perm: s.perm && s.perm[q.id] }),
       feedback),
     h('div', { class: 'nav' },
       h('button', { class: 'btn', type: 'button', disabled: s.idx === 0, onclick: () => goto(s.idx - 1) }, '上一題'),
