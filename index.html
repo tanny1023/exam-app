@@ -697,17 +697,14 @@ function previewedUnits() {
 
 /* ---- 考前複習卡片 ---- */
 function reviewCard() {
-  const due = dueIds().length, weak = weakUnits(), st = S.settings;
+  const weak = weakUnits(), st = S.settings;
   const pick = (key, opts, fmt) => {
     const sel = h('select', {}, opts.map(n => h('option', { value: n, selected: st[key] === n }, fmt(n))));
     sel.addEventListener('change', () => { st[key] = +sel.value; saveSettings(); });
     return sel;
   };
-  const line = (title, sub, btn) => h('div', { class: 'row between rv' }, h('div', {}, h('div', {}, title), h('div', { class: 'sub' }, sub)), btn);
   return h('div', { class: 'card' },
     h('h2', {}, '考前複習'),
-    line(`待複習 ${due} 題`, '答錯的題目會在隔天、3 天、7 天後再出現，連續答對才會漸漸退場',
-      h('button', { class: 'btn pri small', type: 'button', disabled: due === 0, onclick: () => startSession(shuffle(dueIds()).slice(0, 20), 'practice', 'review') }, due ? `複習（${Math.min(due, 20)} 題）` : '今天沒有')),
     h('div', { style: 'margin-top:10px' }, h('div', { class: 'sub' }, '弱點單元（正確率最低，至少做過 5 題才列入）'),
       weak.length ? weak.map(u => h('div', { class: 'row between rv' },
         h('div', {}, h('div', { style: 'font-size:.95rem' }, u.name), h('div', { class: 'sub' }, `正確率 ${Math.round(u.acc * 100)}%（累計作答 ${u.n} 次）`)),
@@ -726,6 +723,7 @@ function reviewCard() {
 function viewHome() {
   const b = S.bank;
   const wrong = getWrong();
+  const dueSet = new Set(dueIds()), book = [...new Set([...wrong, ...dueSet])];   // 錯題本＝答錯的題目＋今天排程該複習的題目
 
   const s = S.session;
   const resume = s && s.ids.every(id => Q[id]) ? h('div', { class: 'card' },
@@ -744,10 +742,18 @@ function viewHome() {
     resume,
     h('div', { class: 'card' },
       h('div', { class: 'row between' },
-        h('div', {}, h('h2', { style: 'margin:0' }, '錯題本'), h('div', { class: 'sub' }, `目前 ${wrong.size} 題`)),
+        h('div', {}, h('h2', { style: 'margin:0' }, '錯題本'), h('div', { class: 'sub' }, `目前 ${book.length} 題`)),
         h('div', { class: 'row' },
-          h('button', { class: 'btn small', type: 'button', disabled: wrong.size === 0, onclick: () => { if (confirm('清空錯題本？')) { const wt = store.get('exam.wrongT', {}), now = Date.now(); [...wrong].forEach(id => { wt[id] = { in: false, t: now }; }); store.set('exam.wrongT', wt); store.set('exam.wrong', []); syncSoon(); go('home', true); } } }, '清空'),
-          h('button', { class: 'btn pri small', type: 'button', disabled: wrong.size === 0, onclick: () => startSession(shuffle([...wrong]), 'practice', 'wrong') }, '練習錯題')))),
+          h('button', { class: 'btn small', type: 'button', disabled: book.length === 0, onclick: () => {
+            if (!confirm('清空錯題本？今天排程要複習的題目也會延到明天。')) return;
+            const wt = store.get('exam.wrongT', {}), now = Date.now(), stats = store.get('exam.stats', {});
+            [...wrong].forEach(id => { wt[id] = { in: false, t: now }; });
+            dueSet.forEach(id => { if (stats[id]) stats[id].due = now + 864e5; });   // 沒登記排程的舊錯題，已由上面從錯題本移除
+            store.set('exam.wrongT', wt); store.set('exam.wrong', []); store.set('exam.stats', stats);
+            syncSoon(); go('home', true);
+          } }, '清空'),
+          h('button', { class: 'btn pri small', type: 'button', disabled: book.length === 0, onclick: () => startSession(shuffle(book.filter(id => dueSet.has(id))).concat(shuffle(book.filter(id => !dueSet.has(id)))), 'practice', 'wrong') }, '練習錯題'))),
+      h('div', { class: 'hint' }, '答錯的題目都在這裡，今天該回頭複習的（隔天、3 天、7 天後再出現）會排在前面；連續答對幾次就會退場。')),
     h('div', { class: 'card' },
       h('h2', {}, '題庫'),
       h('div', { class: 'row' },
