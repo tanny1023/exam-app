@@ -669,6 +669,32 @@ function viewStudy() {
       h('button', { class: 'btn pri', type: 'button', style: 'min-height:52px;font-size:1.02rem', onclick: startExamSet }, '我準備好了，開始考試')));
 }
 
+/* ---- 已預習的單元：預習過的題目，可以依單元再練習或再考 ---- */
+function previewedUnits() {
+  const seen = store.get('exam.seen', {});
+  const rows = S.bank.units.map(u => {
+    const ids = S.bank.questions.filter(q => q.unit === u.name).map(q => q.id);
+    const done = ids.filter(id => seen[id]);
+    return { name: u.name, total: ids.length, done };
+  }).filter(x => x.done.length > 0)
+    .sort((a, b) => (b.done.length === b.total) - (a.done.length === a.total));   // 整個單元都預習完的排前面
+  const start = (x, mode) => {
+    const wrong = getWrong();
+    const ids = shuffle(x.done.filter(id => wrong.has(id))).concat(shuffle(x.done.filter(id => !wrong.has(id))));   // 錯題優先
+    startSession(mode === 'exam' ? shuffle(ids.slice(0, 20)) : ids.slice(0, 20), mode, mode === 'exam' ? 'bank' : 'review');
+  };
+  return h('div', { style: 'margin-top:12px;border-top:1px solid var(--line);padding-top:12px' },
+    h('div', { class: 'sub' }, '已預習的單元（只會出你預習過的題目，錯題優先）'),
+    rows.length
+      ? h('div', { class: 'units', style: 'margin-top:6px' }, rows.map(x => h('div', { class: 'row between rv', style: 'padding:8px 10px' },
+          h('div', {}, h('div', { style: 'font-size:.95rem' }, (x.done.length === x.total ? '✔ ' : '') + x.name),
+            h('div', { class: 'sub' }, x.done.length === x.total ? `全部 ${x.total} 題都預習完了` : `已預習 ${x.done.length} / ${x.total} 題`)),
+          h('div', { class: 'row', style: 'gap:6px;flex:none' },
+            h('button', { class: 'btn small', type: 'button', onclick: () => start(x, 'practice') }, '練習'),
+            h('button', { class: 'btn small', type: 'button', onclick: () => start(x, 'exam') }, '測驗')))))
+      : h('div', { class: 'hint' }, '做完每天的預習與考試後，預習過的單元會出現在這裡。'));
+}
+
 /* ---- 考前複習卡片 ---- */
 function reviewCard() {
   const due = dueIds().length, hard = hardIds().length, weak = weakUnits(), st = S.settings;
@@ -689,6 +715,7 @@ function reviewCard() {
         h('div', {}, h('div', { style: 'font-size:.95rem' }, u.name), h('div', { class: 'sub' }, `正確率 ${Math.round(u.acc * 100)}%（累計作答 ${u.n} 次）`)),
         h('button', { class: 'btn small', type: 'button', onclick: () => startUnitReview(u.name) }, '練習')))
         : h('div', { class: 'hint' }, '多做幾題後，這裡會列出你最需要加強的單元。')),
+    previewedUnits(),
     h('div', { style: 'margin-top:12px;border-top:1px solid var(--line);padding-top:12px' },
       h('div', { class: 'row between' }, h('b', {}, '限時模擬考'), h('span', { class: 'sub' }, '交卷才看答案')),
       h('div', { class: 'row', style: 'margin-top:8px' },
@@ -699,47 +726,8 @@ function reviewCard() {
 
 /* ---- 首頁 ---- */
 function viewHome() {
-  const b = S.bank, st = S.settings;
-  const sel = new Set(st.units || b.units.map(u => u.name));
+  const b = S.bank;
   const wrong = getWrong();
-  const pool = () => b.questions.filter(q => sel.has(q.unit));
-  const info = h('div', { class: 'hint' });
-  const startBtn = h('button', { class: 'btn pri block', type: 'button' }, '開始作答');
-  const refresh = () => {
-    const n = pool().length;
-    info.textContent = `已選 ${sel.size} 個單元，共 ${n} 題`;
-    startBtn.disabled = n === 0;
-    st.units = sel.size === b.units.length ? null : [...sel];
-    saveSettings();
-  };
-
-  const boxes = b.units.map(u => {
-    const cb = h('input', { type: 'checkbox', checked: sel.has(u.name) });
-    cb.addEventListener('change', () => { cb.checked ? sel.add(u.name) : sel.delete(u.name); refresh(); });
-    return { cb, u, el: h('label', { class: 'unit' }, cb, h('span', {}, u.name), h('span', { class: 'n' }, u.count)) };
-  });
-  const setAll = on => { boxes.forEach(x => { x.cb.checked = on; on ? sel.add(x.u.name) : sel.delete(x.u.name); }); refresh(); };
-
-  const countSel = h('select', {}, [10, 20, 30, 50, 100, 0].map(n =>
-    h('option', { value: n, selected: st.count === n }, n === 0 ? '全部' : n + ' 題')));
-  countSel.addEventListener('change', () => { st.count = +countSel.value; saveSettings(); });
-
-  const seg = (opts, cur, onPick) => {
-    const wrap = h('div', { class: 'seg' });
-    opts.forEach(([val, label]) => {
-      const b = h('button', { type: 'button', class: val === cur ? 'on' : '' }, label);
-      b.addEventListener('click', () => { onPick(val); wrap.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b)); });
-      wrap.append(b);
-    });
-    return wrap;
-  };
-
-  startBtn.addEventListener('click', () => {
-    let ids = pool().map(q => q.id);
-    if (st.random) ids = shuffle(ids);
-    if (st.count > 0) ids = ids.slice(0, st.count);
-    startSession(ids, st.mode, 'bank');
-  });
 
   const s = S.session;
   const resume = s && s.ids.every(id => Q[id]) ? h('div', { class: 'card' },
@@ -749,27 +737,13 @@ function viewHome() {
       h('button', { class: 'btn pri grow', type: 'button', onclick: () => go('quiz') }, '繼續'),
       h('button', { class: 'btn', type: 'button', onclick: () => { if (confirm('放棄這份作答？')) { S.session = null; persistSession(); go('home'); } } }, '放棄'))) : null;
 
-  const node = h('div', {},
+  return h('div', {},
     h('h1', {}, '題庫練習'),
     h('div', { class: 'sub' }, `${b.name}｜${b.questions.length} 題`),
     syncCard(),
     taskCard(),
     reviewCard(),
     resume,
-    h('div', { class: 'card' },
-      h('div', { class: 'row between' }, h('h2', { style: 'margin:0' }, '選擇單元'),
-        h('div', { class: 'row' },
-          h('button', { class: 'btn small', type: 'button', onclick: () => setAll(true) }, '全選'),
-          h('button', { class: 'btn small', type: 'button', onclick: () => setAll(false) }, '全不選'))),
-      h('div', { class: 'units' }, boxes.map(x => x.el)),
-      info),
-    h('div', { class: 'card' },
-      h('div', { class: 'row between' }, h('span', {}, '題數'), countSel),
-      h('div', { style: 'margin-top:12px' }, h('div', { class: 'sub' }, '出題順序'),
-        seg([[true, '隨機'], [false, '依序']], st.random, v => { st.random = v; saveSettings(); })),
-      h('div', { style: 'margin-top:12px' }, h('div', { class: 'sub' }, '模式'),
-        seg([['practice', '練習（即時對答案）'], ['exam', '模擬測驗（交卷才看）']], st.mode, v => { st.mode = v; saveSettings(); }))),
-    startBtn,
     h('div', { class: 'card' },
       h('div', { class: 'row between' },
         h('div', {}, h('h2', { style: 'margin:0' }, '錯題本'), h('div', { class: 'sub' }, `目前 ${wrong.size} 題`)),
@@ -784,8 +758,6 @@ function viewHome() {
           ? h('button', { class: 'btn', type: 'button', onclick: () => { store.del('exam.bank'); setBank(buildBank(window.BUILTIN)); S.settings.units = null; toast('已還原內建題庫'); go('home'); } }, '還原內建')
           : null),
       h('div', { class: 'hint' }, 'Excel 需有「題目」「答案」欄；選填「課程名稱」「題型」「解析」。選擇題的選項寫在題目內，格式 (A)…(B)…(C)…(D)…')));
-  refresh();
-  return node;
 }
 
 /* ---- 念題目 ＋ 螢光筆 ---- */
