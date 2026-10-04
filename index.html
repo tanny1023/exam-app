@@ -75,6 +75,8 @@ select{border:1px solid var(--line);background:var(--card);border-radius:10px;pa
 .hlmode .sg{cursor:pointer;border-bottom:1px dashed var(--muted)}
 .sg.mark{background:#ffc2dc;color:#1c2333}
 .reading{background:#ffe14d !important;color:#1c2333 !important;border-radius:6px;box-shadow:0 0 0 3px #ffe14d}
+.rv{padding:8px 0;border-top:1px solid var(--line)}
+.rv:first-of-type{border-top:0}
 .task{border-color:var(--pri)}
 .task .big{font-size:1.25rem;font-weight:700}
 .task .go{min-height:56px;font-size:1.1rem}
@@ -302,7 +304,7 @@ const S = {
   screen: 'home',
   session: null,   // 進行中的作答
   result: null,    // 剛完成的結果
-  settings: Object.assign({ units: null, count: 20, random: true, mode: 'practice', examDate: '2026-12-05', rate: 1, autoRead: false, hl: false }, store.get('exam.settings', {})),
+  settings: Object.assign({ units: null, count: 20, random: true, mode: 'practice', examDate: '2026-12-05', rate: 1, autoRead: false, hl: false, mockCount: 50, mockMin: 60 }, store.get('exam.settings', {})),
   marks: {},       // 自己畫的螢光筆：題目 id → 被標記的段落編號
   speaking: false,
   curKey: null,    // 目前正在念的段落
@@ -316,11 +318,17 @@ function getWrong() {
   const ids = store.get('exam.wrong', []).filter(id => Q[id]);
   return new Set(ids);
 }
+const BOX_DAYS = [0, 1, 3, 7, 14];   // 間隔複習：答對一次就升一格，下次複習的間隔拉長；答錯回到第 0 格（馬上要複習）
 function record(q, ok) {
   const w = getWrong();
   if (!ok) w.add(q.id);
-  else if (S.session && S.session.from === 'wrong') w.delete(q.id);
+  else if (S.session && (S.session.from === 'wrong' || S.session.from === 'review')) w.delete(q.id);
   store.set('exam.wrong', [...w]);
+  const stats = store.get('exam.stats', {}), st = stats[q.id] || { r: 0, w: 0, box: 0 };
+  if (ok) { st.r++; st.box = Math.min(st.box + 1, BOX_DAYS.length - 1); } else { st.w++; st.box = 0; }
+  st.due = Math.min(Date.now() + BOX_DAYS[st.box] * 864e5, new Date(S.settings.examDate + 'T00:00:00').getTime());   // 最晚不超過考試當天
+  stats[q.id] = st;
+  store.set('exam.stats', stats);
   // 練習紀錄：做過哪些題、今天做了幾題
   const seen = store.get('exam.seen', {});
   seen[q.id] = (seen[q.id] || 0) + 1;
@@ -361,7 +369,52 @@ function taskInfo() {
   return { unseen: unseen.length, seenCount: S.bank.questions.length - unseen.length, left, target: t.target, done: daily[today] || 0, streak: calcStreak(daily) };
 }
 
+/* ---- 考前複習 ---- */
+function dueIds() {   // 到期該複習的題目（舊版只有錯題本、沒有紀錄的錯題，也算到期）
+  const stats = store.get('exam.stats', {}), wrong = getWrong(), now = Date.now();
+  return S.bank.questions.map(q => q.id).filter(id => stats[id] ? stats[id].due <= now : wrong.has(id));
+}
+function hardIds() {  // 易錯題：錯過至少 2 次，而且錯的比對的多
+  const stats = store.get('exam.stats', {});
+  return S.bank.questions.map(q => q.id).filter(id => stats[id] && stats[id].w >= 2 && stats[id].w >= stats[id].r);
+}
+function weakUnits() {
+  const stats = store.get('exam.stats', {}), per = {};
+  for (const q of S.bank.questions) {
+    const s = stats[q.id];
+    if (!s) continue;
+    const u = per[q.unit] || (per[q.unit] = { r: 0, w: 0 });
+    u.r += s.r; u.w += s.w;
+  }
+  return Object.entries(per).map(([name, u]) => ({ name, n: u.r + u.w, acc: u.r / (u.r + u.w) }))
+    .filter(x => x.n >= 5).sort((a, b) => a.acc - b.acc).slice(0, 3);
+}
+function startUnitReview(name, n = 20) {
+  const stats = store.get('exam.stats', {});
+  const ids = S.bank.questions.filter(q => q.unit === name).map(q => q.id);
+  const weak = ids.filter(id => stats[id] && stats[id].w >= stats[id].r);
+  startSession(shuffle(weak).concat(shuffle(ids.filter(id => !weak.includes(id)))).slice(0, n), 'practice', 'review');
+}
+// 依優先順序湊題：到期 → 易錯 → 錯題本 → 沒做過 → 其他
+function pickReview(n) {
+  const all = S.bank.questions.map(q => q.id), seen = store.get('exam.seen', {});
+  const ids = [], have = new Set();
+  for (const pool of [dueIds(), hardIds(), [...getWrong()], all.filter(id => !seen[id]), all]) {
+    for (const id of shuffle(pool)) {
+      if (ids.length >= n) return ids;
+      if (!have.has(id)) { have.add(id); ids.push(id); }
+    }
+  }
+  return ids;
+}
+function startMock() {
+  const n = Math.min(S.settings.mockCount, S.bank.questions.length);
+  startSession(shuffle(S.bank.questions.map(q => q.id)).slice(0, n), 'exam', 'mock', false, S.settings.mockMin * 60);
+}
+const clockSec = s => s.limit ? Math.max(0, s.limit - (s.elapsed || 0)) : (s.elapsed || 0);   // 模擬考顯示剩餘時間
+
 function startTask(n) {
+  if (daysBetween(dateStr(), S.settings.examDate) <= REVIEW_DAYS) return startSession(pickReview(n), 'practice', 'review', true);   // 考前衝刺期以複習為主
   const seen = store.get('exam.seen', {});
   const all = S.bank.questions.map(q => q.id);
   let ids = shuffle(all.filter(id => !seen[id])).slice(0, n);              // 先出沒做過的
@@ -437,8 +490,8 @@ function go(screen, keepScroll) {
 }
 const $app = document.getElementById('app');
 
-function startSession(ids, mode, from, task) {
-  S.session = { ids, answers: {}, idx: 0, mode, from, task: !!task, elapsed: 0, away: 0, awaySec: 0 };
+function startSession(ids, mode, from, task, limit) {
+  S.session = { ids, answers: {}, idx: 0, mode, from, task: !!task, limit: limit || 0, elapsed: 0, away: 0, awaySec: 0 };
   persistSession();
   go('quiz');
 }
@@ -456,10 +509,12 @@ function taskCard() {
     go('home', true);
   });
   const dayText = t.left > 0 ? `距離考試還有 ${t.left} 天` : t.left === 0 ? '今天考試，加油！' : '考試日期已過';
+  const sprint = t.left <= REVIEW_DAYS;
   return h('div', { class: 'card task' },
     h('div', { class: 'row between' },
       h('div', { class: 'big' }, dayText),
       t.streak > 0 ? h('div', { class: 'streak' }, `🔥 連續 ${t.streak} 天`) : null),
+    sprint ? h('div', { class: 'fb ok', style: 'margin:8px 0 0' }, '🏁 考前衝刺期：今日任務改為複習（到期題、易錯題、錯題優先）') : null,
     h('div', { class: 'sub' }, `已練習 ${t.seenCount} / ${S.bank.questions.length} 題（還沒做過 ${t.unseen} 題）`),
     h('div', { style: 'margin-top:12px' },
       h('div', { class: 'row between' }, h('span', {}, '今日目標'), h('b', {}, `${t.done} / ${t.target} 題`)),
@@ -468,6 +523,34 @@ function taskCard() {
     h('button', { class: 'btn pri block go', type: 'button', style: 'margin-top:12px', onclick: () => startTask(10) }, reached ? '再做一組（10 題）' : '開始今日任務（10 題）'),
     h('button', { class: 'btn block', type: 'button', style: 'margin-top:8px', onclick: () => startTask(5) }, '不想動？只做 5 題就好'),
     h('div', { class: 'row', style: 'margin-top:10px' }, h('span', { class: 'hint', style: 'margin:0' }, '考試日期'), dateInput));
+}
+
+/* ---- 考前複習卡片 ---- */
+function reviewCard() {
+  const due = dueIds().length, hard = hardIds().length, weak = weakUnits(), st = S.settings;
+  const pick = (key, opts, fmt) => {
+    const sel = h('select', {}, opts.map(n => h('option', { value: n, selected: st[key] === n }, fmt(n))));
+    sel.addEventListener('change', () => { st[key] = +sel.value; saveSettings(); });
+    return sel;
+  };
+  const line = (title, sub, btn) => h('div', { class: 'row between rv' }, h('div', {}, h('div', {}, title), h('div', { class: 'sub' }, sub)), btn);
+  return h('div', { class: 'card' },
+    h('h2', {}, '考前複習'),
+    line(`待複習 ${due} 題`, '答錯的題目會在隔天、3 天、7 天後再出現，連續答對才會漸漸退場',
+      h('button', { class: 'btn pri small', type: 'button', disabled: due === 0, onclick: () => startSession(shuffle(dueIds()).slice(0, 20), 'practice', 'review') }, due ? `複習（${Math.min(due, 20)} 題）` : '今天沒有')),
+    line(`易錯題 ${hard} 題`, '錯過 2 次以上、還沒記牢的題目',
+      h('button', { class: 'btn small', type: 'button', disabled: hard === 0, onclick: () => startSession(shuffle(hardIds()).slice(0, 20), 'practice', 'review') }, '練習')),
+    h('div', { style: 'margin-top:10px' }, h('div', { class: 'sub' }, '弱點單元（正確率最低，至少做過 5 題才列入）'),
+      weak.length ? weak.map(u => h('div', { class: 'row between rv' },
+        h('div', {}, h('div', { style: 'font-size:.95rem' }, u.name), h('div', { class: 'sub' }, `正確率 ${Math.round(u.acc * 100)}%（累計作答 ${u.n} 次）`)),
+        h('button', { class: 'btn small', type: 'button', onclick: () => startUnitReview(u.name) }, '練習')))
+        : h('div', { class: 'hint' }, '多做幾題後，這裡會列出你最需要加強的單元。')),
+    h('div', { style: 'margin-top:12px;border-top:1px solid var(--line);padding-top:12px' },
+      h('div', { class: 'row between' }, h('b', {}, '限時模擬考'), h('span', { class: 'sub' }, '交卷才看答案')),
+      h('div', { class: 'row', style: 'margin-top:8px' },
+        pick('mockCount', [20, 30, 50, 80, 100], n => n + ' 題'),
+        pick('mockMin', [20, 30, 60, 90, 120], n => n + ' 分鐘'),
+        h('button', { class: 'btn pri grow', type: 'button', onclick: startMock }, '開始模擬考'))));
 }
 
 /* ---- 首頁 ---- */
@@ -527,6 +610,7 @@ function viewHome() {
     h('div', { class: 'sub' }, `${b.name}｜${b.questions.length} 題`),
     resume,
     taskCard(),
+    reviewCard(),
     h('div', { class: 'card' },
       h('div', { class: 'row between' }, h('h2', { style: 'margin:0' }, '選擇單元'),
         h('div', { class: 'row' },
@@ -705,7 +789,7 @@ function viewQuiz() {
   return h('div', {},
     h('div', { class: 'row between' },
       h('button', { class: 'btn small', type: 'button', onclick: () => go('home') }, '‹ 離開'),
-      h('span', { class: 'sub' }, `第 ${s.idx + 1} / ${total} 題　⏱ `, h('span', { id: 'clock' }, fmtClock(s.elapsed || 0))),
+      h('span', { class: 'sub' }, `第 ${s.idx + 1} / ${total} 題　${s.limit ? '⏳ 剩 ' : '⏱ '}`, h('span', { id: 'clock' }, fmtClock(clockSec(s)))),
       practice ? h('span', { style: 'width:64px' }) : h('button', { class: 'btn small', type: 'button', onclick: () => finishSession(true) }, '交卷')),
     h('div', { class: 'bar' }, h('i', { style: `width:${(s.idx + 1) / total * 100}%` })),
     readingTools(),
@@ -721,7 +805,7 @@ function viewQuiz() {
         : h('button', { class: 'btn pri', type: 'button', onclick: () => goto(s.idx + 1) }, '下一題')));
 }
 
-function finishSession(confirmUnanswered) {
+function finishSession(confirmUnanswered, timeUp) {
   const s = S.session;
   const unanswered = s.ids.filter(id => !TYPES[Q[id].type].isAnswered(Q[id], s.answers[id])).length;
   if (confirmUnanswered && unanswered && !confirm(`還有 ${unanswered} 題未作答，確定要交卷嗎？`)) return;
@@ -731,13 +815,25 @@ function finishSession(confirmUnanswered) {
       if (T.isAnswered(q, s.answers[id])) record(q, T.isCorrect(q, s.answers[id]));
     }
   }
-  S.result = { ids: s.ids, answers: s.answers, mode: s.mode, from: s.from, task: s.task, elapsed: s.elapsed || 0, away: s.away || 0, awaySec: s.awaySec || 0 };
+  S.result = { ids: s.ids, answers: s.answers, mode: s.mode, from: s.from, task: s.task, timeUp: !!timeUp, elapsed: s.elapsed || 0, away: s.away || 0, awaySec: s.awaySec || 0 };
   S.session = null;
   persistSession();
   go('result');
 }
 
 /* ---- 結果 ---- */
+function unitBreakdown(items) {   // 模擬考：各單元答對率，由低到高，一眼看出該補哪裡
+  const per = {};
+  for (const x of items) {
+    const u = per[x.q.unit] || (per[x.q.unit] = { ok: 0, n: 0 });
+    u.n++; if (x.ok) u.ok++;
+  }
+  return h('div', { class: 'card' }, h('h2', {}, '各單元表現（弱的排前面）'),
+    Object.entries(per).sort((a, b) => a[1].ok / a[1].n - b[1].ok / b[1].n).map(([name, u]) =>
+      h('div', { class: 'row between rv' }, h('span', { style: 'font-size:.95rem' }, name),
+        h('b', { style: `color:var(${u.ok / u.n < 0.6 ? '--bad' : '--ok'})` }, `${u.ok}/${u.n}`))));
+}
+
 function viewResult() {
   const r = S.result;
   if (!r) return viewHome();
@@ -767,6 +863,7 @@ function viewResult() {
     h('h1', {}, r.mode === 'exam' ? '測驗結果' : '練習結果'),
     h('div', { class: 'card' },
       h('div', { class: 'score' }, `${Math.round(right / total * 100)}%`),
+      r.timeUp ? h('div', { class: 'me', style: 'color:var(--bad)' }, '⏰ 時間到，已自動交卷') : null,
       h('div', { class: 'sub' }, `答對 ${right} / ${total} 題　用時 ${fmtClock(r.elapsed)}`),
       r.away > 0 ? h('div', { class: 'sub' }, `中途離開 ${r.away} 次，共 ${fmtDur(r.awaySec)}`) : (r.elapsed > 0 ? h('div', { class: 'sub' }, '✨ 全程專心，沒有離開') : null),
       r.task ? (() => { const t = taskInfo(); return h('div', { style: 'margin-top:10px' }, `今日進度：${t.done} / ${t.target} 題` + (t.done >= t.target ? ' 🎉 目標達成' : '')); })() : null),
@@ -774,6 +871,7 @@ function viewResult() {
       r.task ? h('button', { class: 'btn pri grow', type: 'button', onclick: () => startTask(10) }, '再來一組（10 題）') : null,
       h('button', { class: r.task ? 'btn grow' : 'btn pri grow', type: 'button', disabled: bad.length === 0, onclick: () => startSession(shuffle(bad.map(x => x.q.id)), r.mode, 'wrong') }, `重做答錯的（${bad.length}）`),
       h('button', { class: 'btn grow', type: 'button', onclick: () => go('home') }, '回首頁')),
+    r.from === 'mock' ? unitBreakdown(items) : null,
     h('div', { class: 'card' },
       h('div', { class: 'row between', style: 'margin-bottom:6px' }, h('h2', { style: 'margin:0' }, '題目檢討'), toggle),
       list));
@@ -787,7 +885,8 @@ setInterval(() => {
   if (S.screen !== 'quiz' || !s || document.hidden) return;
   s.elapsed = (s.elapsed || 0) + 1;
   const c = document.getElementById('clock');
-  if (c) c.textContent = fmtClock(s.elapsed);
+  if (c) c.textContent = fmtClock(clockSec(s));
+  if (s.limit && s.elapsed >= s.limit) { toast('⏰ 時間到，自動交卷'); finishSession(false, true); return; }
   if (s.elapsed % 5 === 0) persistSession();
 }, 1000);
 
