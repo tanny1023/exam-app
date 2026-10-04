@@ -1265,20 +1265,54 @@ async function syncLogin() {
   }
 }
 
-const syncLogout = async () => { if (SYNC.auth) await SYNC.auth.signOut(); toast('已登出，這台裝置上的紀錄還在'); };
+// 這台裝置上屬於「帳號」的紀錄（題庫本身不算，登出時不會動）
+const ACCT_KEYS = ['exam.seen', 'exam.daily', 'exam.stats', 'exam.wrong', 'exam.wrongT', 'exam.mine', 'exam.settings', 'exam.session', 'exam.set', 'exam.syncLast'];
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// 登出：先把紀錄上傳，再清掉這台裝置上的紀錄（紀錄在 Google 帳號裡，下次登入會回來）。
+// 這樣換另一個帳號登入時，不會把上一個帳號的紀錄混進去
+async function syncLogout() {
+  if (!SYNC.auth || !SYNC.user) return;
+  while (SYNC.busy) await sleep(200);
+  const ok = await syncNow(true);
+  const msg = ok
+    ? '登出後，這台裝置上的練習紀錄會清掉（已經存在你的 Google 帳號裡，下次登入就會回來）。確定要登出嗎？'
+    : '現在無法同步（可能沒有網路），登出會清掉這台裝置上的紀錄，還沒上傳的修改會遺失。確定要登出嗎？';
+  if (!confirm(msg)) return;
+  await SYNC.auth.signOut();
+  ACCT_KEYS.forEach(k => store.del(k));
+  store.del('exam.owner');
+  SYNC.reload();
+}
+SYNC.reload = () => location.reload();
 
 async function syncNow(silent) {
-  if (!SYNC.user || SYNC.busy) return;
+  if (!SYNC.user || SYNC.busy) return false;
   SYNC.busy = true; SYNC.msg = '同步中…'; paintSync();
+  let ok = false, reload = false;
   try {
-    const ref = SYNC.db.collection('users').doc(SYNC.user.uid);
+    const uid = SYNC.user.uid;
+    const ref = SYNC.db.collection('users').doc(uid);
     const snap = await ref.get();
     const remote = snap.exists ? JSON.parse(snap.data().data) : null;
-    const merged = mergeState(collectState(), remote);
+    const owner = store.get('exam.owner', null);
+    let merged;
+    if (owner && owner !== uid) {
+      // 這台裝置上留著另一個帳號的紀錄：先備份起來，不合併進這個帳號，改用這個帳號雲端的紀錄
+      store.set('exam.backup.' + owner, collectState());
+      merged = remote || { v: 1, t: Date.now(), seen: {}, daily: {}, stats: {}, wrong: [], wrongT: {}, mine: {}, settings: null };
+      ['exam.settings', 'exam.session', 'exam.set'].forEach(k => store.del(k));
+      reload = true;
+    } else {
+      merged = mergeState(collectState(), remote);   // 沒登入時做的紀錄、或同一個帳號：合併
+    }
     applyState(merged);
+    store.set('exam.owner', uid);
     await ref.set({ data: JSON.stringify(merged), updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
     SYNC.last = Date.now(); store.set('exam.syncLast', SYNC.last); SYNC.msg = '';
+    ok = true;
     if (!silent) toast('已同步');
+    if (reload) { SYNC.busy = false; SYNC.reload(); return true; }
     if (S.screen === 'home') go('home', true);
   } catch (e) {
     SYNC.msg = '同步失敗：' + (e.code || e.message);
@@ -1286,6 +1320,7 @@ async function syncNow(silent) {
   }
   SYNC.busy = false;
   paintSync();
+  return ok;
 }
 
 function syncSoon() {
