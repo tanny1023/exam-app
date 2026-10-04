@@ -516,6 +516,9 @@ function taskCard() {
       t.streak > 0 ? h('div', { class: 'streak' }, `🔥 連續 ${t.streak} 天`) : null),
     sprint ? h('div', { class: 'fb ok', style: 'margin:8px 0 0' }, '🏁 考前衝刺期：今日任務改為複習（到期題、易錯題、錯題優先）') : null,
     h('div', { class: 'sub' }, `已練習 ${t.seenCount} / ${S.bank.questions.length} 題（還沒做過 ${t.unseen} 題）`),
+    h('div', { class: 'hint' }, sprint ? `衝刺期：每天複習約 ${t.target} 題`
+      : t.unseen === 0 ? '題庫全部做過一輪了，之後以複習為主'
+      : `計畫：還有 ${t.unseen} 題沒做過，扣掉考前 ${REVIEW_DAYS} 天複習，剩 ${t.left - REVIEW_DAYS} 天 → 每天約 ${t.target} 題`),
     h('div', { style: 'margin-top:12px' },
       h('div', { class: 'row between' }, h('span', {}, '今日目標'), h('b', {}, `${t.done} / ${t.target} 題`)),
       h('div', { class: 'bar', style: 'margin:6px 0 0' }, h('i', { style: `width:${pct}%` }))),
@@ -608,9 +611,9 @@ function viewHome() {
   const node = h('div', {},
     h('h1', {}, '題庫練習'),
     h('div', { class: 'sub' }, `${b.name}｜${b.questions.length} 題`),
+    reviewCard(),
     resume,
     taskCard(),
-    reviewCard(),
     h('div', { class: 'card' },
       h('div', { class: 'row between' }, h('h2', { style: 'margin:0' }, '選擇單元'),
         h('div', { class: 'row' },
