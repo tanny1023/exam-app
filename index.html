@@ -1023,6 +1023,13 @@ function viewQuiz() {
       practice ? h('span', { style: 'width:64px' }) : h('button', { class: 'btn small', type: 'button', onclick: () => finishSession(true) }, '交卷')),
     h('div', { class: 'bar' }, h('i', { style: `width:${(s.idx + 1) / total * 100}%` })),
     readingTools(),
+    s.from === 'set' ? h('div', { class: 'row', style: 'margin:4px 0' },
+      h('button', { class: 'btn small', type: 'button', onclick: () => {
+        const n = s.ids.filter(id => TYPES[Q[id].type].isAnswered(Q[id], s.answers[id])).length;
+        if (n && !confirm(`回去重新預習，這份考卷已經作答的 ${n} 題會清掉，預習完再重新考，確定嗎？`)) return;
+        S.session = null; persistSession();   // 這一組的 10 題不變，預習完按「開始考試」就重新考
+        go('study');
+      } }, '📖 重新預習這 10 題')) : null,
     h('div', { class: 'card' },
       h('div', { class: 'tag' }, q.unit + (q.no ? `　#${q.no}` : '')),
       stemNode(q),
