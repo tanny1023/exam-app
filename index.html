@@ -697,7 +697,7 @@ function previewedUnits() {
 
 /* ---- 考前複習卡片 ---- */
 function reviewCard() {
-  const due = dueIds().length, hard = hardIds().length, weak = weakUnits(), st = S.settings;
+  const due = dueIds().length, weak = weakUnits(), st = S.settings;
   const pick = (key, opts, fmt) => {
     const sel = h('select', {}, opts.map(n => h('option', { value: n, selected: st[key] === n }, fmt(n))));
     sel.addEventListener('change', () => { st[key] = +sel.value; saveSettings(); });
@@ -708,8 +708,6 @@ function reviewCard() {
     h('h2', {}, '考前複習'),
     line(`待複習 ${due} 題`, '答錯的題目會在隔天、3 天、7 天後再出現，連續答對才會漸漸退場',
       h('button', { class: 'btn pri small', type: 'button', disabled: due === 0, onclick: () => startSession(shuffle(dueIds()).slice(0, 20), 'practice', 'review') }, due ? `複習（${Math.min(due, 20)} 題）` : '今天沒有')),
-    line(`易錯題 ${hard} 題`, '錯過 2 次以上、還沒記牢的題目',
-      h('button', { class: 'btn small', type: 'button', disabled: hard === 0, onclick: () => startSession(shuffle(hardIds()).slice(0, 20), 'practice', 'review') }, '練習')),
     h('div', { style: 'margin-top:10px' }, h('div', { class: 'sub' }, '弱點單元（正確率最低，至少做過 5 題才列入）'),
       weak.length ? weak.map(u => h('div', { class: 'row between rv' },
         h('div', {}, h('div', { style: 'font-size:.95rem' }, u.name), h('div', { class: 'sub' }, `正確率 ${Math.round(u.acc * 100)}%（累計作答 ${u.n} 次）`)),
