@@ -463,23 +463,6 @@ function hardIds() {  // 易錯題：錯過至少 2 次，而且錯的比對的�
   const stats = store.get('exam.stats', {});
   return S.bank.questions.map(q => q.id).filter(id => stats[id] && stats[id].w >= 2 && stats[id].w >= stats[id].r);
 }
-function weakUnits() {
-  const stats = store.get('exam.stats', {}), per = {};
-  for (const q of S.bank.questions) {
-    const s = stats[q.id];
-    if (!s) continue;
-    const u = per[q.unit] || (per[q.unit] = { r: 0, w: 0 });
-    u.r += s.r; u.w += s.w;
-  }
-  return Object.entries(per).map(([name, u]) => ({ name, n: u.r + u.w, acc: u.r / (u.r + u.w) }))
-    .filter(x => x.n >= 5).sort((a, b) => a.acc - b.acc).slice(0, 3);
-}
-function startUnitReview(name, n = 20) {
-  const stats = store.get('exam.stats', {});
-  const ids = S.bank.questions.filter(q => q.unit === name).map(q => q.id);
-  const weak = ids.filter(id => stats[id] && stats[id].w >= stats[id].r);
-  startSession(shuffle(weak).concat(shuffle(ids.filter(id => !weak.includes(id)))).slice(0, n), 'practice', 'review');
-}
 // 依優先順序湊題：到期 → 易錯 → 錯題本 → 沒做過 → 其他
 function pickReview(n) {
   const all = S.bank.questions.map(q => q.id), seen = store.get('exam.seen', {});
@@ -683,7 +666,7 @@ function previewedUnits() {
     const ids = shuffle(x.done.filter(id => wrong.has(id))).concat(shuffle(x.done.filter(id => !wrong.has(id))));   // 錯題優先
     startSession(mode === 'exam' ? shuffle(ids.slice(0, 20)) : ids.slice(0, 20), mode, mode === 'exam' ? 'bank' : 'review');
   };
-  return h('div', { style: 'margin-top:12px;border-top:1px solid var(--line);padding-top:12px' },
+  return h('div', { style: 'margin-top:6px' },
     h('div', { class: 'sub' }, '已預習的單元（只會出你預習過的題目，錯題優先）'),
     rows.length
       ? h('div', { class: 'units', style: 'margin-top:6px' }, rows.map(x => h('div', { class: 'row between rv', style: 'padding:8px 10px' },
@@ -697,7 +680,7 @@ function previewedUnits() {
 
 /* ---- 考前複習卡片 ---- */
 function reviewCard() {
-  const weak = weakUnits(), st = S.settings;
+  const st = S.settings;
   const pick = (key, opts, fmt) => {
     const sel = h('select', {}, opts.map(n => h('option', { value: n, selected: st[key] === n }, fmt(n))));
     sel.addEventListener('change', () => { st[key] = +sel.value; saveSettings(); });
@@ -705,11 +688,6 @@ function reviewCard() {
   };
   return h('div', { class: 'card' },
     h('h2', {}, '考前複習'),
-    h('div', { style: 'margin-top:10px' }, h('div', { class: 'sub' }, '弱點單元（正確率最低，至少做過 5 題才列入）'),
-      weak.length ? weak.map(u => h('div', { class: 'row between rv' },
-        h('div', {}, h('div', { style: 'font-size:.95rem' }, u.name), h('div', { class: 'sub' }, `正確率 ${Math.round(u.acc * 100)}%（累計作答 ${u.n} 次）`)),
-        h('button', { class: 'btn small', type: 'button', onclick: () => startUnitReview(u.name) }, '練習')))
-        : h('div', { class: 'hint' }, '多做幾題後，這裡會列出你最需要加強的單元。')),
     previewedUnits(),
     h('div', { style: 'margin-top:12px;border-top:1px solid var(--line);padding-top:12px' },
       h('div', { class: 'row between' }, h('b', {}, '限時模擬考'), h('span', { class: 'sub' }, '交卷才看答案')),
