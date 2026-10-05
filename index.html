@@ -470,17 +470,36 @@ function hardIds() {  // 易錯題：錯過至少 2 次，而且錯的比對的�
   const stats = store.get('exam.stats', {});
   return S.bank.questions.map(q => q.id).filter(id => stats[id] && stats[id].w >= 2 && stats[id].w >= stats[id].r);
 }
-// 依優先順序湊題：到期 → 易錯 → 錯題本 → 沒做過 → 其他
-function pickReview(n) {
-  const all = S.bank.questions.map(q => q.id), seen = store.get('exam.seen', {});
-  const ids = [], have = new Set();
-  for (const pool of [dueIds(), hardIds(), [...getWrong()], all.filter(id => !seen[id]), all]) {
-    for (const id of shuffle(pool)) {
-      if (ids.length >= n) return ids;
-      if (!have.has(id)) { have.add(id); ids.push(id); }
-    }
+/* 依遺忘曲線排出建議複習的題目：預估記憶剩越少的排越前面。
+ * 每題答完會排下次複習時間（BOX_DAYS：1、3、7、14 天，答錯馬上要複習）；
+ * 預估記憶 R = 0.9 ^ (離上次多久 ÷ 排定的間隔)：剛好到複習時間約剩 90%，拖越久越低。 */
+const DAY = 864e5, GOAL_PASSES = 2;   // 目標：考前每題至少念過 2 輪
+function reviewQueue() {
+  const stats = store.get('exam.stats', {}), seen = store.get('exam.seen', {}), wrong = getWrong(), now = Date.now();
+  const due = [], ahead = [];
+  for (const q of S.bank.questions) {
+    const st = stats[q.id];
+    if (!st && !seen[q.id] && !wrong.has(q.id)) continue;   // 還沒做過的是新題，不在複習裡
+    const r = st ? Math.pow(0.9, (now - st.t) / DAY / Math.max(0.5, (st.due - st.t) / DAY)) * (st.ok === false ? 0.5 : 1)   // 最近答錯的，記得最不牢
+      : (wrong.has(q.id) ? 0.3 : 0.5);
+    const row = { id: q.id, r, due: st ? st.due : 0 };
+    (row.due <= now ? due : ahead).push(row);
   }
+  due.sort((a, b) => a.r - b.r);
+  ahead.sort((a, b) => a.due - b.due);   // 還沒到期的：最快要到期的先
+  return { due, ahead };
+}
+function pickReview(n) {   // 湊 n 題複習：到期的 → 快到期的 → 其他
+  const { due, ahead } = reviewQueue(), ids = due.concat(ahead).slice(0, n).map(x => x.id);
+  if (ids.length < n) for (const id of shuffle(S.bank.questions.map(q => q.id))) { if (ids.length >= n) break; if (!ids.includes(id)) ids.push(id); }
   return ids;
+}
+function goalInfo() {   // 「12/5 前每題念兩輪」的進度與每天要做的量
+  const seen = store.get('exam.seen', {}), total = S.bank.questions.length;
+  let n1 = 0, n2 = 0, need = 0;
+  for (const q of S.bank.questions) { const c = seen[q.id] || 0; if (c >= 1) n1++; if (c >= GOAL_PASSES) n2++; need += Math.max(0, GOAL_PASSES - c); }
+  const left = Math.max(1, daysBetween(dateStr(), S.settings.examDate));
+  return { total, n1, n2, need, left, perDay: Math.ceil(need / left), today: store.get('exam.daily', {})[dateStr()] || 0 };
 }
 function startMock() {
   const n = Math.min(S.settings.mockCount, S.bank.questions.length);
@@ -682,7 +701,7 @@ function viewStudy() {
 }
 
 /* ---- 已預習的單元：預習過的題目，可以依單元再練習或再考 ---- */
-const REVIEW_BATCH = 10;   // 複習時，一次出幾題
+const REVIEW_BATCH = SET_SIZE;   // 複習時，一次出幾題（跟每組一樣）
 function previewedUnits() {
   const seen = store.get('exam.seen', {});
   const rows = S.bank.units.map(u => {
@@ -695,7 +714,7 @@ function previewedUnits() {
     return shuffle(x.done.filter(id => wrong.has(id))).concat(shuffle(x.done.filter(id => !wrong.has(id)))).slice(0, REVIEW_BATCH);
   };
   return h('div', { style: 'margin-top:6px' },
-    h('div', { class: 'sub' }, `做過的單元（只會出你做過的題目，錯題優先，一次 ${REVIEW_BATCH} 題）`),
+    h('div', { class: 'sub' }, `自己挑單元（只會出你做過的題目，錯題優先，一次 ${REVIEW_BATCH} 題）`),
     rows.length
       ? h('div', { class: 'units', style: 'margin-top:6px' }, rows.map(x => h('div', { class: 'row between rv', style: 'padding:8px 10px' },
           h('div', {}, h('div', { style: 'font-size:.95rem' }, (x.done.length === x.total ? '✔ ' : '') + x.name),
@@ -706,7 +725,32 @@ function previewedUnits() {
       : h('div', { class: 'hint' }, '做完每天的預習與考試後，做過的單元會出現在這裡。'));
 }
 
-/* ---- 考前複習卡片 ---- */
+/* ---- 複習卡片：依遺忘曲線自動排出今天建議複習的題目，一次一組 ---- */
+function suggestBlock() {
+  const g = goalInfo(), { due, ahead } = reviewQueue();
+  const useDue = due.length > 0, pool = useDue ? due : ahead, batch = pool.slice(0, REVIEW_BATCH).map(x => x.id);
+  const mdate = S.settings.examDate.slice(5).replace('-', '/').replace(/^0/, '').replace('/0', '/');
+  const pct = x => Math.round(x / g.total * 100);
+  const bar = (label, n) => h('div', { style: 'margin-top:6px' },
+    h('div', { class: 'row between' }, h('span', { class: 'sub' }, label), h('span', { class: 'sub' }, `${n} / ${g.total} 題`)),
+    h('div', { class: 'bar', style: 'margin:3px 0 0' }, h('i', { style: `width:${pct(n)}%` })));
+  const avg = batch.length ? Math.round(pool.slice(0, batch.length).reduce((s, x) => s + x.r, 0) / batch.length * 100) : 0;
+  return h('div', {},
+    h('div', { class: 'sub' }, `目標：${mdate} 前每一題至少念過 ${GOAL_PASSES} 輪`),
+    bar('第 1 輪', g.n1), bar(`第 ${GOAL_PASSES} 輪`, g.n2),
+    h('div', { class: 'hint', style: 'margin:6px 0 0' }, g.need === 0 ? '🎉 目標達成了，之後照排程複習維持記憶就好。'
+      : `還差 ${g.need} 題次，距離考試 ${g.left} 天，平均每天約 ${g.perDay} 題（${Math.ceil(g.perDay / SET_SIZE)} 組）。今天已做 ${g.today} 題。`),
+    h('div', { style: 'margin-top:12px;border-top:1px solid var(--line);padding-top:12px' },
+      h('div', { class: 'row between' }, h('b', {}, useDue ? `今天建議複習：${due.length} 題到期` : '今天到期的都複習完了 👍'),
+        h('span', { class: 'sub' }, '遺忘曲線排序')),
+      h('div', { class: 'sub', style: 'margin-top:2px' }, batch.length
+        ? (useDue ? `最容易忘的排前面，這一組預估記憶剩約 ${avg}%，` : `想多練可以提前複習最快要到期的，`) + `一次 ${batch.length} 題。`
+        : '還沒有做過的題目，先去做新的一組吧。'),
+      batch.length ? h('div', { class: 'row', style: 'margin-top:8px' },
+        h('button', { class: 'btn pri grow', type: 'button', onclick: () => { S.study = { ids: batch, label: '複習' }; go('study'); } }, useDue ? `複習這 ${batch.length} 題` : `提前複習 ${batch.length} 題`),
+        h('button', { class: 'btn', type: 'button', onclick: () => startSession(batch, 'exam', 'review') }, '直接測驗')) : null));
+}
+
 function reviewCard() {
   const st = S.settings;
   const pick = (key, opts, fmt) => {
@@ -715,8 +759,9 @@ function reviewCard() {
     return sel;
   };
   return h('div', { class: 'card' },
-    h('h2', {}, '考前複習'),
-    previewedUnits(),
+    h('h2', {}, '複習'),
+    suggestBlock(),
+    h('div', { style: 'margin-top:12px;border-top:1px solid var(--line);padding-top:12px' }, previewedUnits()),
     h('div', { style: 'margin-top:12px;border-top:1px solid var(--line);padding-top:12px' },
       h('div', { class: 'row between' }, h('b', {}, '限時模擬考'), h('span', { class: 'sub' }, '交卷才看答案')),
       h('div', { class: 'row', style: 'margin-top:8px' },
