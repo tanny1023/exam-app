@@ -423,7 +423,6 @@ function calcStreak(daily) {
   return n;
 }
 
-const REVIEW_DAYS = 10;   // 考前最後幾天留給複習
 function taskInfo() {
   const seen = store.get('exam.seen', {}), daily = store.get('exam.daily', {}), today = dateStr();
   const unseen = S.bank.questions.filter(q => !seen[q.id]);
@@ -436,7 +435,6 @@ function taskInfo() {
 /* ---- 一組 5 題：先預習（看答案＋記憶法）→ 再考同一份 5 題 ---- */
 const SET_SIZE = 5;
 function pickSet() {
-  if (daysBetween(dateStr(), S.settings.examDate) <= REVIEW_DAYS) return pickReview(SET_SIZE);   // 考前衝刺期以複習為主
   const seen = store.get('exam.seen', {});
   const ids = S.bank.questions.filter(q => !seen[q.id]).slice(0, SET_SIZE).map(q => q.id);     // 沒做過的，依章節順序
   return ids.length < SET_SIZE ? ids.concat(pickReview(SET_SIZE).filter(id => !ids.includes(id))).slice(0, SET_SIZE) : ids;
@@ -541,6 +539,7 @@ function pickExcel() {
  * ============================================================ */
 function go(screen, keepScroll) {
   S.screen = screen;
+  if (screen === 'home' || screen === 'result') S.study = null;
   if (screen !== 'quiz' || !keepScroll) stopSpeak();   // 換題或離開作答畫面就停止念題
   const view = { home: viewHome, study: viewStudy, quiz: viewQuiz, result: viewResult }[screen];
   $app.replaceChildren(view());
@@ -553,11 +552,10 @@ function go(screen, keepScroll) {
 const $app = document.getElementById('app');
 
 function startSession(ids, mode, from, task, limit) {
+  mode = 'exam';   // 只有一種作答方式：測驗（選項隨機換位置，答完馬上對答案）
   S.session = { ids, answers: {}, idx: 0, mode, from, task: !!task, limit: limit || 0, elapsed: 0, away: 0, awaySec: 0 };
-  if (mode === 'exam') {   // 只有考試才隨機換選項順序；練習與預習維持 Excel 原本的順序
-    S.session.perm = {};
-    for (const id of ids) { const T = TYPES[Q[id].type]; if (T.shuffleOK && T.shuffleOK(Q[id])) S.session.perm[id] = shuffle([0, 1, 2, 3]); }
-  }
+  S.session.perm = {};   // 考試時選項隨機換位置；預習維持 Excel 原本的順序
+  for (const id of ids) { const T = TYPES[Q[id].type]; if (T.shuffleOK && T.shuffleOK(Q[id])) S.session.perm[id] = shuffle([0, 1, 2, 3]); }
   persistSession();
   go('quiz');
 }
@@ -574,12 +572,10 @@ function taskCard() {
     go('home', true);
   });
   const dayText = t.left > 0 ? `距離考試還有 ${t.left} 天` : t.left === 0 ? '今天考試，加油！' : '考試日期已過';
-  const sprint = t.left <= REVIEW_DAYS;
   return h('div', { class: 'card task' },
     h('div', { class: 'row between' },
       h('div', { class: 'big' }, dayText),
       t.streak > 0 ? h('div', { class: 'streak' }, `🔥 連續 ${t.streak} 天`) : null),
-    sprint ? h('div', { class: 'fb ok', style: 'margin:8px 0 0' }, '🏁 考前衝刺期：每一組以複習題為主（排程到期的題目與錯題優先）') : null,
     h('div', { style: 'margin-top:12px' },
       h('div', { class: 'row between' }, h('span', {}, '整體進度'), h('b', {}, t.unseen === 0 ? '全部都做過一輪了 🎉' : `還剩 ${t.groupsLeft} 組（${t.unseen} 題）還沒做`)),
       h('div', { class: 'bar', style: 'margin:6px 0 0' }, h('i', { style: `width:${pct}%` })),
@@ -626,7 +622,8 @@ function studyCard(q, i, n) {
 }
 
 function viewStudy() {
-  const set = curSet(), no = setNo();
+  const rv = S.study;   // 從「做過的單元」進來的複習預習；沒有就是今天這一組
+  const set = rv ? { ids: rv.ids } : curSet(), no = setNo();
   const cards = set.ids.map((id, i) => studyCard(Q[id], i, set.ids.length));
   // 一題一題念：題號、題目、答案（以上皆是會把每個選項念出來）、記憶法
   const readAll = () => speakItems(set.ids.flatMap((id, i) => {
@@ -640,40 +637,39 @@ function viewStudy() {
   return h('div', {},
     h('div', { class: 'row between' },
       h('button', { class: 'btn small', type: 'button', onclick: () => go('home') }, '‹ 返回'),
-      h('b', {}, `第 ${no} 組　預習`),
+      h('b', {}, rv ? '複習預習' : `第 ${no} 組　預習`),
       HAS_TTS ? h('button', { class: 'btn small', type: 'button', id: 'speakBtn', 'data-idle': '🔊 念給我聽', onclick: () => (S.speaking || S.paused) ? stopSpeak() : readAll() }, '🔊 念給我聽') : h('span', { style: 'width:64px' })),
-    h('div', { class: 'hint', style: 'margin:8px 0 0' }, `先把這 ${SET_SIZE} 題連答案看（或聽）一遍，準備好再按下面的按鈕，會考同樣這 ${SET_SIZE} 題。`),
+    h('div', { class: 'hint', style: 'margin:8px 0 0' }, `先把這 ${set.ids.length} 題連答案看（或聽）一遍，準備好再按下面的按鈕，會考同樣這 ${set.ids.length} 題。`),
     cards,
     h('div', { class: 'nav' },
       HAS_TTS ? h('button', { class: 'btn ctl', type: 'button', id: 'pauseBtn', disabled: true, onclick: togglePause }, '⏸ 暫停') : null,
       HAS_TTS ? h('button', { class: 'btn ctl', type: 'button', onclick: readAll }, '↺ 重新開始') : null,
-      h('button', { class: 'btn pri', type: 'button', style: 'min-height:52px;font-size:1.02rem', onclick: startExamSet }, '我準備好了，開始考試')));
+      h('button', { class: 'btn pri', type: 'button', style: 'min-height:52px;font-size:1.02rem', onclick: () => rv ? startSession(rv.ids, 'exam', 'review') : startExamSet() }, '我準備好了，開始考試')));
 }
 
 /* ---- 已預習的單元：預習過的題目，可以依單元再練習或再考 ---- */
+const REVIEW_BATCH = 10;   // 複習時，一次出幾題
 function previewedUnits() {
   const seen = store.get('exam.seen', {});
   const rows = S.bank.units.map(u => {
     const ids = S.bank.questions.filter(q => q.unit === u.name).map(q => q.id);
-    const done = ids.filter(id => seen[id]);
-    return { name: u.name, total: ids.length, done };
+    return { name: u.name, total: ids.length, done: ids.filter(id => seen[id]) };
   }).filter(x => x.done.length > 0)
-    .sort((a, b) => (b.done.length === b.total) - (a.done.length === a.total));   // 整個單元都預習完的排前面
-  const start = (x, mode) => {
+    .sort((a, b) => (b.done.length === b.total) - (a.done.length === a.total));   // 整個單元都做完的排前面
+  const pick = x => {   // 這個單元做過的題目，錯題優先，一次 REVIEW_BATCH 題
     const wrong = getWrong();
-    const ids = shuffle(x.done.filter(id => wrong.has(id))).concat(shuffle(x.done.filter(id => !wrong.has(id))));   // 錯題優先
-    startSession(mode === 'exam' ? shuffle(ids.slice(0, 20)) : ids.slice(0, 20), mode, mode === 'exam' ? 'bank' : 'review');
+    return shuffle(x.done.filter(id => wrong.has(id))).concat(shuffle(x.done.filter(id => !wrong.has(id)))).slice(0, REVIEW_BATCH);
   };
   return h('div', { style: 'margin-top:6px' },
-    h('div', { class: 'sub' }, '已預習的單元（只會出你預習過的題目，錯題優先）'),
+    h('div', { class: 'sub' }, `做過的單元（只會出你做過的題目，錯題優先，一次 ${REVIEW_BATCH} 題）`),
     rows.length
       ? h('div', { class: 'units', style: 'margin-top:6px' }, rows.map(x => h('div', { class: 'row between rv', style: 'padding:8px 10px' },
           h('div', {}, h('div', { style: 'font-size:.95rem' }, (x.done.length === x.total ? '✔ ' : '') + x.name),
-            h('div', { class: 'sub' }, x.done.length === x.total ? `全部 ${x.total} 題都預習完了` : `已預習 ${x.done.length} / ${x.total} 題`)),
+            h('div', { class: 'sub' }, x.done.length === x.total ? `全部 ${x.total} 題都做過了` : `已做過 ${x.done.length} / ${x.total} 題`)),
           h('div', { class: 'row', style: 'gap:6px;flex:none' },
-            h('button', { class: 'btn small', type: 'button', onclick: () => start(x, 'practice') }, '練習'),
-            h('button', { class: 'btn small', type: 'button', onclick: () => start(x, 'exam') }, '測驗')))))
-      : h('div', { class: 'hint' }, '做完每天的預習與考試後，預習過的單元會出現在這裡。'));
+            h('button', { class: 'btn small', type: 'button', onclick: () => { S.study = { ids: pick(x), label: x.name }; go('study'); } }, '預習'),
+            h('button', { class: 'btn small', type: 'button', onclick: () => startSession(pick(x), 'exam', 'review') }, '測驗')))))
+      : h('div', { class: 'hint' }, '做完每天的預習與考試後，做過的單元會出現在這裡。'));
 }
 
 /* ---- 考前複習卡片 ---- */
@@ -704,7 +700,7 @@ function viewHome() {
   const s = S.session;
   const resume = s && s.ids.every(id => Q[id]) ? h('div', { class: 'card' },
     h('h2', {}, '有一份未完成的作答'),
-    h('div', { class: 'sub' }, `${s.mode === 'exam' ? '模擬測驗' : '練習'}，做到第 ${s.idx + 1} / ${s.ids.length} 題`),
+    h('div', { class: 'sub' }, `測驗，做到第 ${s.idx + 1} / ${s.ids.length} 題`),
     h('div', { class: 'row', style: 'margin-top:10px' },
       h('button', { class: 'btn pri grow', type: 'button', onclick: () => go('quiz') }, '繼續'),
       h('button', { class: 'btn', type: 'button', onclick: () => { if (confirm('放棄這份作答？')) { S.session = null; persistSession(); go('home'); } } }, '放棄'))) : null;
@@ -728,7 +724,7 @@ function viewHome() {
             store.set('exam.wrongT', wt); store.set('exam.wrong', []); store.set('exam.stats', stats);
             syncSoon(); go('home', true);
           } }, '清空'),
-          h('button', { class: 'btn pri small', type: 'button', disabled: book.length === 0, onclick: () => startSession(shuffle(book.filter(id => dueSet.has(id))).concat(shuffle(book.filter(id => !dueSet.has(id)))), 'practice', 'wrong') }, '練習錯題'))),
+          h('button', { class: 'btn pri small', type: 'button', disabled: book.length === 0, onclick: () => startSession(shuffle(book.filter(id => dueSet.has(id))).concat(shuffle(book.filter(id => !dueSet.has(id)))), 'exam', 'wrong') }, '測驗錯題'))),
       h('div', { class: 'hint' }, '答錯的題目都在這裡，今天該回頭複習的（隔天、3 天、7 天後再出現）會排在前面；連續答對幾次就會退場。')),
     h('div', { class: 'card' },
       h('h2', {}, '題庫'),
@@ -882,10 +878,17 @@ function answerLines(q) {
   return T.answerNote ? T.answerNote(q) : [];
 }
 
+// 畫面上的正確答案：考試時選項換了位置，字母要照畫面上的
+function shownAnswer(q, perm) {
+  if (!perm || q.type !== 'choice') return TYPES[q.type].fmtAnswer(q);
+  const oi = 'ABCD'.indexOf(q.answer);
+  return `(${'ABCD'[perm.indexOf(oi)]}) ${q.options[oi]}`;
+}
+
 // 答錯時要加強的內容：先說正確答案、再說記憶法、最後再重複一次答案
-function explainSpeech(q, key) {
+function explainSpeech(q, key, perm) {
   const T = TYPES[q.type], mn = mnemoOf(q);
-  const ans = forSpeech('正確答案是 ' + T.fmtAnswer(q).replace(/^\(([A-Z])\)\s*/, '$1，'));
+  const ans = forSpeech('正確答案是 ' + shownAnswer(q, perm).replace(/^\(([A-Z])\)\s*/, '$1，'));
   const out = [{ key, text: '請記住，' + ans }];
   answerLines(q).forEach(l => out.push({ key, text: forSpeech(l) }));
   if (mn) { out.push({ key, text: '記憶法' }); mn.split(/(?<=[。！？\n])/).filter(t => t.trim()).forEach(t => out.push({ key, text: forSpeech(t) })); }
@@ -894,11 +897,11 @@ function explainSpeech(q, key) {
 }
 
 // 答錯的題目：醒目地列出正確答案＋記憶法
-function wrongBlock(q, replay) {
+function wrongBlock(q, replay, perm) {
   const T = TYPES[q.type], mn = mnemoOf(q), note = answerLines(q);
   return h('div', { class: 'wrongbox' },
     h('div', { class: 'wb-title' }, '✘ 答錯了，請記住正確答案'),
-    h('div', { class: 'wb-ans' }, T.fmtAnswer(q)),
+    h('div', { class: 'wb-ans' }, shownAnswer(q, perm)),
     note.length ? h('div', { class: 'mn2' }, note.map(l => h('div', {}, l))) : null,
     mn ? h('div', { class: 'mn big' }, '💡 記憶法：', mn) : null,
     q.explain ? h('div', { class: 'sub', style: 'margin-top:6px;white-space:pre-wrap' }, q.explain) : null,
@@ -948,22 +951,22 @@ function viewQuiz() {
   const s = S.session;
   if (!s) return viewHome();
   const q = Q[s.ids[s.idx]], T = TYPES[q.type];
-  const total = s.ids.length, practice = s.mode === 'practice';
+  const total = s.ids.length, perm = s.perm && s.perm[q.id];
   const v = s.answers[q.id];
   const answered = T.isAnswered(q, v);
-  const locked = practice && answered;
+  const locked = answered;   // 答完就鎖住並馬上對答案
 
   const onChange = val => {
     if (locked) return;
-    if (!practice && val === s.answers[q.id] && T.deselectable !== false) delete s.answers[q.id];
-    else s.answers[q.id] = val;
+    s.answers[q.id] = val;
+    (s.rec || (s.rec = {}))[q.id] = 1;
     stopSpeak();
-    if (practice) record(q, T.isCorrect(q, val));
+    record(q, T.isCorrect(q, val));
     persistSession();
     go('quiz', true);
-    if (practice && S.settings.autoRead && T.isAnswered(q, val)) {
+    if (S.settings.autoRead && T.isAnswered(q, val)) {
       const ok = T.isCorrect(q, val);
-      speakItems(ok ? [{ key: null, text: '答對了' }] : [{ key: null, text: '答錯了' }].concat(explainSpeech(q, null)));
+      speakItems(ok ? [{ key: null, text: '答對了' }] : [{ key: null, text: '答錯了' }].concat(explainSpeech(q, null, perm)));
     }
   };
 
@@ -971,18 +974,18 @@ function viewQuiz() {
   const last = s.idx === total - 1;
 
   let feedback = null;
-  if (practice && answered) {
+  if (answered) {
     const ok = T.isCorrect(q, v);
     feedback = ok
       ? h('div', { class: 'fb ok' }, '✔ 答對了', q.explain ? '\n' + q.explain : '')
-      : wrongBlock(q, () => speakItems(explainSpeech(q, null)));
+      : wrongBlock(q, () => speakItems(explainSpeech(q, null, perm)), perm);
   }
 
   return h('div', {},
     h('div', { class: 'row between' },
       h('button', { class: 'btn small', type: 'button', onclick: () => go('home') }, '‹ 離開'),
       h('span', { class: 'sub' }, `第 ${s.idx + 1} / ${total} 題　${s.limit ? '⏳ 剩 ' : '⏱ '}`, h('span', { id: 'clock' }, fmtClock(clockSec(s)))),
-      practice ? h('span', { style: 'width:64px' }) : h('button', { class: 'btn small', type: 'button', onclick: () => finishSession(true) }, '交卷')),
+      h('span', { style: 'width:64px' })),
     h('div', { class: 'bar' }, h('i', { style: `width:${(s.idx + 1) / total * 100}%` })),
     readingTools(),
     s.from === 'set' ? h('div', { class: 'row', style: 'margin:4px 0' },
@@ -995,24 +998,22 @@ function viewQuiz() {
     h('div', { class: 'card' },
       h('div', { class: 'tag' }, q.unit + (q.no ? `　#${q.no}` : '')),
       stemNode(q),
-      T.render(q, { value: v, revealed: practice && answered, locked, onChange, perm: s.perm && s.perm[q.id] }),
+      T.render(q, { value: v, revealed: answered, locked, onChange, perm }),
       feedback),
     h('div', { class: 'nav' },
       h('button', { class: 'btn', type: 'button', disabled: s.idx === 0, onclick: () => goto(s.idx - 1) }, '上一題'),
       last
-        ? h('button', { class: 'btn pri', type: 'button', onclick: () => finishSession(!practice) }, practice ? '看結果' : '交卷')
+        ? h('button', { class: 'btn pri', type: 'button', onclick: () => finishSession(true) }, '看結果')
         : h('button', { class: 'btn pri', type: 'button', onclick: () => goto(s.idx + 1) }, '下一題')));
 }
 
 function finishSession(confirmUnanswered, timeUp) {
   const s = S.session;
   const unanswered = s.ids.filter(id => !TYPES[Q[id].type].isAnswered(Q[id], s.answers[id])).length;
-  if (confirmUnanswered && unanswered && !confirm(`還有 ${unanswered} 題未作答，確定要交卷嗎？`)) return;
-  if (s.mode === 'exam') {
-    for (const id of s.ids) {
-      const q = Q[id], T = TYPES[q.type];
-      if (T.isAnswered(q, s.answers[id])) record(q, T.isCorrect(q, s.answers[id]));
-    }
+  if (confirmUnanswered && unanswered && !confirm(`還有 ${unanswered} 題還沒作答，確定要看結果嗎？`)) return;
+  for (const id of s.ids) {   // 舊版（交卷才對答案）留下、還沒記錄的作答，補記錄
+    const q = Q[id], T = TYPES[q.type];
+    if (T.isAnswered(q, s.answers[id]) && !(s.rec && s.rec[id])) record(q, T.isCorrect(q, s.answers[id]));
   }
   if (s.from === 'set') store.del('exam.set');   // 這一組考完了，下一組會抽新的題目
   S.result = { ids: s.ids, answers: s.answers, mode: s.mode, from: s.from, task: s.task, timeUp: !!timeUp, elapsed: s.elapsed || 0, away: s.away || 0, awaySec: s.awaySec || 0 };
@@ -1067,7 +1068,7 @@ function viewResult() {
   toggle.addEventListener('click', () => { showAll = !showAll; toggle.textContent = showAll ? '只看答錯的' : '顯示全部題目'; drawList(); });
 
   return h('div', {},
-    h('h1', {}, r.mode === 'exam' ? '測驗結果' : '練習結果'),
+    h('h1', {}, '測驗結果'),
     h('div', { class: 'card' },
       h('div', { class: 'score' }, `${Math.round(right / total * 100)}%`),
       r.timeUp ? h('div', { class: 'me', style: 'color:var(--bad)' }, '⏰ 時間到，已自動交卷') : null,
