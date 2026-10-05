@@ -75,10 +75,12 @@ select{border:1px solid var(--line);background:var(--card);border-radius:10px;pa
 .hlmode .sg{cursor:pointer;border-bottom:1px dashed var(--muted)}
 .sg.mark{background:#ffc2dc;color:#1c2333}
 .reading{background:#ffe14d !important;color:#1c2333 !important;border-radius:6px;box-shadow:0 0 0 3px #ffe14d}
+.card.reading,.wi.reading{background:var(--card) !important;color:var(--fg) !important;box-shadow:none;border-radius:14px;outline:4px solid #ffe14d;outline-offset:1px}
+.wi.reading{background:transparent !important;border-radius:10px}
 .sopts{display:flex;flex-direction:column;gap:6px}
-.sopt{display:flex;gap:8px;padding:8px 10px;border-radius:10px;border:1px solid var(--line);color:var(--muted);font-size:.95rem;white-space:pre-wrap;word-break:break-word}
+.sopt{display:flex;gap:8px;padding:8px 10px;border-radius:10px;border:1px solid var(--line);color:var(--fg);opacity:.82;font-size:.95rem;white-space:pre-wrap;word-break:break-word}
 .sopt b{flex:none;width:20px}
-.sopt.right{border:2px solid var(--ok);background:var(--okbg);color:var(--fg);font-weight:600}
+.sopt.right{border:2px solid var(--ok);background:var(--okbg);color:var(--fg);font-weight:600;opacity:1}
 .wrongbox{margin-top:12px;padding:12px;border:2px solid var(--bad);border-radius:12px;background:var(--badbg)}
 .wb-title{font-weight:700;color:var(--bad)}
 .wb-ans{font-size:1.12rem;font-weight:700;margin:6px 0;white-space:pre-wrap;word-break:break-word}
@@ -426,11 +428,13 @@ function taskInfo() {
   const seen = store.get('exam.seen', {}), daily = store.get('exam.daily', {}), today = dateStr();
   const unseen = S.bank.questions.filter(q => !seen[q.id]);
   const left = daysBetween(today, S.settings.examDate);
-  return { unseen: unseen.length, seenCount: S.bank.questions.length - unseen.length, left, target: S.settings.daily, done: daily[today] || 0, streak: calcStreak(daily) };
+  const total = S.bank.questions.length;
+  return { total, unseen: unseen.length, seenCount: total - unseen.length, left, streak: calcStreak(daily),
+    groupsDone: Math.floor((total - unseen.length) / SET_SIZE), groupsLeft: Math.ceil(unseen.length / SET_SIZE), groupsTotal: Math.ceil(total / SET_SIZE) };
 }
 
-/* ---- 每日 10 組：先預習（看答案＋記憶法）→ 再考同一份 10 題 ---- */
-const SET_SIZE = 10;
+/* ---- 一組 5 題：先預習（看答案＋記憶法）→ 再考同一份 5 題 ---- */
+const SET_SIZE = 5;
 function pickSet() {
   if (daysBetween(dateStr(), S.settings.examDate) <= REVIEW_DAYS) return pickReview(SET_SIZE);   // 考前衝刺期以複習為主
   const seen = store.get('exam.seen', {});
@@ -439,10 +443,10 @@ function pickSet() {
 }
 function curSet() {   // 目前這一組的題目；存起來，中途離開再回來題目不會變
   let s = store.get('exam.set', null);
-  if (!s || !s.ids.every(id => Q[id])) { s = { ids: pickSet() }; store.set('exam.set', s); }
+  if (!s || s.ids.length !== SET_SIZE || !s.ids.every(id => Q[id])) { s = { ids: pickSet() }; store.set('exam.set', s); }
   return s;
 }
-const setNo = () => Math.floor(taskInfo().done / SET_SIZE) + 1;
+const setNo = () => taskInfo().groupsDone + 1;
 const startExamSet = () => startSession(curSet().ids, 'exam', 'set', true);
 const baseMnemo = q => (window.MNEMO && S.bank.name === (window.BUILTIN || {}).name && q.no != null && MNEMO[q.no]) || '';
 const myMnemo = q => store.get('exam.mine', {})[q.id];            // 自己編輯的版本：{ text, t }，text 為 null 表示已還原預設
@@ -558,12 +562,10 @@ function startSession(ids, mode, from, task, limit) {
   go('quiz');
 }
 
-/* ---- 今日任務卡片 ---- */
+/* ---- 首頁最上面的進度卡片：整體進度，還剩幾組、幾題沒做 ---- */
 function taskCard() {
-  const t = taskInfo(), pct = Math.min(100, Math.round(t.done / t.target * 100));
-  const reached = t.done >= t.target, sets = Math.round(t.target / SET_SIZE), doneSets = Math.floor(t.done / SET_SIZE);
+  const t = taskInfo(), pct = Math.min(100, Math.round(t.seenCount / t.total * 100));
   const inExam = S.session && S.session.from === 'set';
-  const fin = new Date(); fin.setDate(fin.getDate() + Math.ceil(t.unseen / t.target));
   const dateInput = h('input', { type: 'date', value: S.settings.examDate, style: 'border:1px solid var(--line);background:var(--card);color:inherit;border-radius:8px;padding:4px 6px;font:inherit;font-size:.85rem' });
   dateInput.addEventListener('change', () => {
     if (!dateInput.value) return;
@@ -577,21 +579,17 @@ function taskCard() {
     h('div', { class: 'row between' },
       h('div', { class: 'big' }, dayText),
       t.streak > 0 ? h('div', { class: 'streak' }, `🔥 連續 ${t.streak} 天`) : null),
-    sprint ? h('div', { class: 'fb ok', style: 'margin:8px 0 0' }, '🏁 考前衝刺期：今日任務改為複習（到期題、易錯題、錯題優先）') : null,
-    h('div', { class: 'sub' }, `已練習 ${t.seenCount} / ${S.bank.questions.length} 題（還沒做過 ${t.unseen} 題）`),
-    h('div', { class: 'hint' }, sprint ? '衝刺期：每組以複習題為主（到期題、易錯題優先）'
-      : t.unseen === 0 ? '題庫全部做過一輪了，之後以複習為主'
-      : `每天 ${t.target} 題（${sets} 組），還有 ${t.unseen} 題沒做過，約 ${fin.getMonth() + 1}/${fin.getDate()} 做完第一輪，之後都是複習`),
+    sprint ? h('div', { class: 'fb ok', style: 'margin:8px 0 0' }, '🏁 考前衝刺期：每一組以複習題為主（排程到期的題目與錯題優先）') : null,
     h('div', { style: 'margin-top:12px' },
-      h('div', { class: 'row between' }, h('span', {}, '今日進度'), h('b', {}, `${doneSets} / ${sets} 組（${t.done} / ${t.target} 題）`)),
-      h('div', { class: 'bar', style: 'margin:6px 0 0' }, h('i', { style: `width:${pct}%` }))),
-    reached ? h('div', { class: 'fb ok', style: 'margin-top:10px' }, '🎉 今天的 100 題完成了！想多做一組也可以。') : null,
+      h('div', { class: 'row between' }, h('span', {}, '整體進度'), h('b', {}, t.unseen === 0 ? '全部都做過一輪了 🎉' : `還剩 ${t.groupsLeft} 組（${t.unseen} 題）還沒做`)),
+      h('div', { class: 'bar', style: 'margin:6px 0 0' }, h('i', { style: `width:${pct}%` })),
+      h('div', { class: 'sub' }, `已完成 ${t.groupsDone} / ${t.groupsTotal} 組（每組 ${SET_SIZE} 題）`)),
     h('button', { class: 'btn pri block go', type: 'button', style: 'margin-top:12px', onclick: () => inExam ? go('quiz') : go('study') },
-      inExam ? `繼續考試（第 ${doneSets + 1} 組）` : `開始第 ${doneSets + 1} 組：先看答案`),
+      inExam ? `繼續考試（第 ${t.groupsDone + 1} 組）` : t.unseen === 0 ? '再來一組複習' : `開始第 ${t.groupsDone + 1} 組：先看答案`),
     h('div', { class: 'row', style: 'margin-top:10px' }, h('span', { class: 'hint', style: 'margin:0' }, '考試日期'), dateInput));
 }
 
-/* ---- 預習畫面：這一組 10 題的題目＋答案＋記憶法，看完再按「開始考試」 ---- */
+/* ---- 預習畫面：這一組的題目＋答案＋記憶法，看完再按「開始考試」 ---- */
 /* ---- 預習卡片：題目、答案、記憶法（記憶法可以自己改） ---- */
 function studyCard(q, i, n) {
   const T = TYPES[q.type], note = answerLines(q);
@@ -644,7 +642,7 @@ function viewStudy() {
       h('button', { class: 'btn small', type: 'button', onclick: () => go('home') }, '‹ 返回'),
       h('b', {}, `第 ${no} 組　預習`),
       HAS_TTS ? h('button', { class: 'btn small', type: 'button', id: 'speakBtn', 'data-idle': '🔊 念給我聽', onclick: () => (S.speaking || S.paused) ? stopSpeak() : readAll() }, '🔊 念給我聽') : h('span', { style: 'width:64px' })),
-    h('div', { class: 'hint', style: 'margin:8px 0 0' }, '先把這 10 題連答案看（或聽）一遍，準備好再按下面的按鈕，會考同樣這 10 題。'),
+    h('div', { class: 'hint', style: 'margin:8px 0 0' }, `先把這 ${SET_SIZE} 題連答案看（或聽）一遍，準備好再按下面的按鈕，會考同樣這 ${SET_SIZE} 題。`),
     cards,
     h('div', { class: 'nav' },
       HAS_TTS ? h('button', { class: 'btn ctl', type: 'button', id: 'pauseBtn', disabled: true, onclick: togglePause }, '⏸ 暫停') : null,
@@ -991,9 +989,9 @@ function viewQuiz() {
       h('button', { class: 'btn small', type: 'button', onclick: () => {
         const n = s.ids.filter(id => TYPES[Q[id].type].isAnswered(Q[id], s.answers[id])).length;
         if (n && !confirm(`回去重新預習，這份考卷已經作答的 ${n} 題會清掉，預習完再重新考，確定嗎？`)) return;
-        S.session = null; persistSession();   // 這一組的 10 題不變，預習完按「開始考試」就重新考
+        S.session = null; persistSession();   // 這一組的題目不變，預習完按「開始考試」就重新考
         go('study');
-      } }, '📖 重新預習這 10 題')) : null,
+      } }, `📖 重新預習這 ${SET_SIZE} 題`)) : null,
     h('div', { class: 'card' },
       h('div', { class: 'tag' }, q.unit + (q.no ? `　#${q.no}` : '')),
       stemNode(q),
@@ -1075,7 +1073,7 @@ function viewResult() {
       r.timeUp ? h('div', { class: 'me', style: 'color:var(--bad)' }, '⏰ 時間到，已自動交卷') : null,
       h('div', { class: 'sub' }, `答對 ${right} / ${total} 題　用時 ${fmtClock(r.elapsed)}`),
       r.away > 0 ? h('div', { class: 'sub' }, `中途離開 ${r.away} 次，共 ${fmtDur(r.awaySec)}`) : (r.elapsed > 0 ? h('div', { class: 'sub' }, '✨ 全程專心，沒有離開') : null),
-      r.task ? (() => { const t = taskInfo(); return h('div', { style: 'margin-top:10px' }, `今日進度：${t.done} / ${t.target} 題` + (t.done >= t.target ? ' 🎉 目標達成' : '')); })() : null),
+      r.task ? (() => { const t = taskInfo(); return h('div', { style: 'margin-top:10px' }, t.unseen === 0 ? '整體進度：全部都做過一輪了 🎉' : `整體進度：還剩 ${t.groupsLeft} 組（${t.unseen} 題）還沒做`); })() : null),
     h('div', { class: 'row' },
       r.from === 'set' ? h('button', { class: 'btn pri grow', type: 'button', onclick: () => go('study') }, `下一組（第 ${setNo()} 組）`) : null,
       h('button', { class: r.from === 'set' ? 'btn grow' : 'btn pri grow', type: 'button', disabled: bad.length === 0, onclick: () => startSession(shuffle(bad.map(x => x.q.id)), r.mode, 'wrong') }, `重做答錯的（${bad.length}）`),
