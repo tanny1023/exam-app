@@ -308,7 +308,7 @@ function findType(rec) {
   return Object.values(TYPES).find(t => t.parse(rec)) || null;
 }
 
-function sheetToQuestions(rows, seen, out) {
+function sheetToQuestions(rows, seen, out, si) {
   let hi = -1;
   for (let i = 0; i < Math.min(rows.length, 15); i++) {
     const r = rows[i].map(x => String(x).trim());
@@ -334,7 +334,7 @@ function sheetToQuestions(rows, seen, out) {
     let id = hash(rec.unit + '|' + stem);
     if (seen[id] != null) id += '_' + (++seen[id]); else seen[id] = 0;
     const no = parseInt(get(r, c.no), 10);
-    out.push(Object.assign({ id, type: T.id, unit: rec.unit, no: isNaN(no) ? null : no, explain: rec.explain }, parsed));
+    out.push(Object.assign({ id, type: T.id, unit: rec.unit, no: isNaN(no) ? null : no, explain: rec.explain, _si: si, _ri: i }, parsed));
   }
   return { skipped, found: true };
 }
@@ -342,8 +342,8 @@ function sheetToQuestions(rows, seen, out) {
 function buildBank(src) {
   const questions = [], seen = {};
   let skipped = 0, found = false;
-  for (const rows of src.sheets) {
-    const r = sheetToQuestions(rows, seen, questions);
+  for (const [si, rows] of src.sheets.entries()) {
+    const r = sheetToQuestions(rows, seen, questions, si);
     skipped += r.skipped;
     found = found || r.found;
   }
@@ -355,7 +355,7 @@ function buildBank(src) {
     if (idx[q.unit] == null) { idx[q.unit] = units.length; units.push({ name: q.unit, count: 0 }); }
     units[idx[q.unit]].count++;
   }
-  return { name: src.name, questions, units, skipped };
+  return { name: src.name, questions, units, skipped, src };
 }
 
 /* ============================================================
@@ -534,6 +534,35 @@ function pickExcel() {
   input.click();
 }
 
+/* ---- 匯出 Excel：原本的題庫＋多一欄「記憶法」 ---- */
+function buildExportWorkbook() {
+  const wb = XLSX.utils.book_new();
+  S.bank.src.sheets.forEach((rows, si) => {
+    const data = rows.map(r => r.slice());
+    const qs = S.bank.questions.filter(q => q._si === si);
+    if (qs.length) {
+      const col = Math.max(...data.map(r => r.length));
+      let hi = -1;
+      for (let i = 0; i < Math.min(data.length, 15); i++) { const r = data[i].map(x => String(x).trim()); if (r.includes('題目') && r.includes('答案')) { hi = i; break; } }
+      if (hi >= 0) data[hi][col] = '記憶法';
+      for (const q of qs) data[q._ri][col] = mnemoOf(q);
+      data.forEach(r => { for (let c = 0; c <= col; c++) if (r[c] === undefined) r[c] = ''; });
+    }
+    const ws = XLSX.utils.aoa_to_sheet(data);
+    const width = Math.max(...data.map(r => r.length));
+    ws['!cols'] = Array.from({ length: width }, (_, c) => ({ wch: c === width - 1 && qs.length ? 60 : c === 2 ? 70 : c === 1 ? 28 : 10 }));
+    XLSX.utils.book_append_sheet(wb, ws, `工作表${si + 1}`.slice(0, 31));
+  });
+  return wb;
+}
+
+function exportExcel() {
+  try {
+    XLSX.writeFile(buildExportWorkbook(), `題庫_含記憶法_${dateStr()}.xlsx`);
+    toast('已匯出，檔案在你的「下載」資料夾');
+  } catch (e) { toast('匯出失敗：' + e.message, 5000); }
+}
+
 /* ============================================================
  * 畫面
  * ============================================================ */
@@ -637,7 +666,7 @@ function viewStudy() {
   return h('div', {},
     h('div', { class: 'row between' },
       h('button', { class: 'btn small', type: 'button', onclick: () => go('home') }, '‹ 返回'),
-      h('b', {}, rv ? '複習預習' : `第 ${no} 組　預習`),
+      h('b', {}, rv ? '複習' : `第 ${no} 組　預習`),
       HAS_TTS ? h('button', { class: 'btn small', type: 'button', id: 'speakBtn', 'data-idle': '🔊 念給我聽', onclick: () => (S.speaking || S.paused) ? stopSpeak() : readAll() }, '🔊 念給我聽') : h('span', { style: 'width:64px' })),
     h('div', { class: 'hint', style: 'margin:8px 0 0' }, `先把這 ${set.ids.length} 題連答案看（或聽）一遍，準備好再按下面的按鈕，會考同樣這 ${set.ids.length} 題。`),
     cards,
@@ -667,7 +696,7 @@ function previewedUnits() {
           h('div', {}, h('div', { style: 'font-size:.95rem' }, (x.done.length === x.total ? '✔ ' : '') + x.name),
             h('div', { class: 'sub' }, x.done.length === x.total ? `全部 ${x.total} 題都做過了` : `已做過 ${x.done.length} / ${x.total} 題`)),
           h('div', { class: 'row', style: 'gap:6px;flex:none' },
-            h('button', { class: 'btn small', type: 'button', onclick: () => { S.study = { ids: pick(x), label: x.name }; go('study'); } }, '預習'),
+            h('button', { class: 'btn small', type: 'button', onclick: () => { S.study = { ids: pick(x), label: x.name }; go('study'); } }, '複習'),
             h('button', { class: 'btn small', type: 'button', onclick: () => startSession(pick(x), 'exam', 'review') }, '測驗')))))
       : h('div', { class: 'hint' }, '做完每天的預習與考試後，做過的單元會出現在這裡。'));
 }
@@ -730,6 +759,7 @@ function viewHome() {
       h('h2', {}, '題庫'),
       h('div', { class: 'row' },
         h('button', { class: 'btn grow', type: 'button', onclick: pickExcel }, '匯入 Excel 題庫'),
+        h('button', { class: 'btn grow', type: 'button', onclick: exportExcel }, '匯出 Excel（含記憶法）'),
         window.BUILTIN && store.get('exam.bank', null)
           ? h('button', { class: 'btn', type: 'button', onclick: () => { store.del('exam.bank'); setBank(buildBank(window.BUILTIN)); S.settings.units = null; toast('已還原內建題庫'); go('home'); } }, '還原內建')
           : null),
