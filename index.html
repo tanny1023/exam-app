@@ -88,6 +88,8 @@ select{border:1px solid var(--line);background:var(--card);border-radius:10px;pa
 .sopt.right{border:2px solid var(--ok);background:var(--okbg);color:var(--fg);font-weight:600;opacity:1}
 .wrongbox{margin-top:12px;padding:12px;border:2px solid var(--bad);border-radius:12px;background:var(--badbg)}
 .wb-title{font-weight:700;color:var(--bad)}
+.rightbox{border-color:var(--ok);background:var(--okbg)}
+.rightbox .wb-title{color:var(--ok)}
 .wb-ans{font-size:1.12rem;font-weight:700;margin:6px 0;white-space:pre-wrap;word-break:break-word}
 .mn-edit{width:100%;box-sizing:border-box;font:inherit;line-height:1.6;padding:10px;border:2px solid var(--pri);border-radius:10px;background:var(--card);color:inherit;resize:vertical}
 .mine{font-size:.8rem;color:#7a5a00;margin-left:6px}
@@ -989,6 +991,25 @@ function wrongBlock(q, replay, perm) {
     HAS_TTS && replay ? h('button', { class: 'btn small', type: 'button', style: 'margin-top:8px', onclick: replay }, '🔊 再念一次') : null);
 }
 
+// 答對時：只複習記憶法（不用再重複答案）
+function mnemoSpeech(q, key) {
+  const mn = mnemoOf(q), out = [];
+  if (mn) { out.push({ key, text: '記憶法' }); mn.split(/(?<=[。！？\n])/).filter(t => t.trim()).forEach(t => out.push({ key, text: forSpeech(t) })); }
+  return out;
+}
+
+// 答對的題目：也列出答案＋記憶法，順便再複習一次
+function rightBlock(q, replay, perm) {
+  const mn = mnemoOf(q), note = answerLines(q);
+  return h('div', { class: 'wrongbox rightbox' },
+    h('div', { class: 'wb-title' }, '✔ 答對了'),
+    h('div', { class: 'wb-ans' }, shownAnswer(q, perm)),
+    note.length ? h('div', { class: 'mn2' }, note.map(l => h('div', {}, l))) : null,
+    mn ? h('div', { class: 'mn big' }, '💡 記憶法：', mn) : null,
+    q.explain ? h('div', { class: 'sub', style: 'margin-top:6px;white-space:pre-wrap' }, q.explain) : null,
+    HAS_TTS && replay && mn ? h('button', { class: 'btn small', type: 'button', style: 'margin-top:8px', onclick: replay }, '🔊 念記憶法') : null);
+}
+
 function answerSpeechItems(q, key) {
   const T = TYPES[q.type];
   const out = [{ key, text: forSpeech('正確答案是 ' + T.fmtAnswer(q).replace(/^\(([A-Z])\)\s*/, '$1，')) }];
@@ -1047,7 +1068,7 @@ function viewQuiz() {
     go('quiz', true);
     if (S.settings.autoRead && T.isAnswered(q, val)) {
       const ok = T.isCorrect(q, val);
-      speakItems(ok ? [{ key: null, text: '答對了' }] : [{ key: null, text: '答錯了' }].concat(explainSpeech(q, null, perm)));
+      speakItems(ok ? [{ key: null, text: '答對了' }].concat(mnemoSpeech(q, null)) : [{ key: null, text: '答錯了' }].concat(explainSpeech(q, null, perm)));
     }
   };
 
@@ -1058,7 +1079,7 @@ function viewQuiz() {
   if (answered) {
     const ok = T.isCorrect(q, v);
     feedback = ok
-      ? h('div', { class: 'fb ok' }, '✔ 答對了', q.explain ? '\n' + q.explain : '')
+      ? rightBlock(q, () => speakItems(mnemoSpeech(q, null)), perm)
       : wrongBlock(q, () => speakItems(explainSpeech(q, null, perm)), perm);
   }
 
