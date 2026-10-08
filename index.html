@@ -373,7 +373,7 @@ const S = {
   screen: 'home',
   session: null,   // 進行中的作答
   result: null,    // 剛完成的結果
-  settings: Object.assign({ units: null, count: 20, random: true, mode: 'practice', examDate: '2026-12-05', daily: 100, rate: 1, autoRead: false, hl: false, mockCount: 50, mockMin: 60 }, store.get('exam.settings', {})),
+  settings: Object.assign({ units: null, count: 20, random: true, mode: 'practice', examDate: '2026-12-05', daily: 100, rate: 1, autoRead: false, hl: false, mockCount: 50, mockMin: 60, dailySets: 20 }, store.get('exam.settings', {})),
   marks: {},       // 自己畫的螢光筆：題目 id → 被標記的段落編號
   speaking: false,
   curKey: null,    // 目前正在念的段落
@@ -626,18 +626,22 @@ function taskCard() {
     saveSettings();
     go('home', true);
   });
+  const goalSets = S.settings.dailySets || 20, todaySets = Math.floor((store.get('exam.daily', {})[dateStr()] || 0) / SET_SIZE);   // 每答 5 題算 1 組（新題＋複習都算）
+  const goalSel = h('select', { style: dateInput.style.cssText }, [5, 10, 15, 20, 25, 30, 40, 50].map(n => h('option', { value: n, selected: n === goalSets }, n + ' 組')));
+  goalSel.addEventListener('change', () => { S.settings.dailySets = +goalSel.value; saveSettings(); go('home', true); });
   const dayText = t.left > 0 ? `距離考試還有 ${t.left} 天` : t.left === 0 ? '今天考試，加油！' : '考試日期已過';
   return h('div', { class: 'card task' },
     h('div', { class: 'row between' },
       h('div', { class: 'big' }, dayText),
-      t.streak > 0 ? h('div', { class: 'streak' }, `🔥 連續 ${t.streak} 天`) : null),
+      h('div', { class: 'streak' }, `今天 ${todaySets} / ${goalSets} 組${todaySets >= goalSets ? ' ✔' : ''}`)),
     h('div', { style: 'margin-top:12px' },
       h('div', { class: 'row between' }, h('span', {}, '整體進度'), h('b', {}, t.unseen === 0 ? '全部都做過一輪了 🎉' : `還剩 ${t.groupsLeft} 組（${t.unseen} 題）還沒做`)),
       h('div', { class: 'bar', style: 'margin:6px 0 0' }, h('i', { style: `width:${pct}%` })),
       h('div', { class: 'sub' }, `已完成 ${t.groupsDone} / ${t.groupsTotal} 組（每組 ${SET_SIZE} 題）`)),
     h('button', { class: 'btn pri block go', type: 'button', style: 'margin-top:12px', onclick: () => inExam ? go('quiz') : go('study') },
       inExam ? `繼續考試（第 ${t.groupsDone + 1} 組）` : t.unseen === 0 ? '再來一組複習' : `開始第 ${t.groupsDone + 1} 組：先看答案`),
-    h('div', { class: 'row', style: 'margin-top:10px' }, h('span', { class: 'hint', style: 'margin:0' }, '考試日期'), dateInput));
+    h('div', { class: 'row', style: 'margin-top:10px;flex-wrap:wrap' }, h('span', { class: 'hint', style: 'margin:0' }, '考試日期'), dateInput,
+      h('span', { class: 'hint', style: 'margin:0 0 0 8px' }, '每日目標'), goalSel));
 }
 
 /* ---- 預習畫面：這一組的題目＋答案＋記憶法，看完再按「開始考試」 ---- */
