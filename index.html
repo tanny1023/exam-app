@@ -1113,10 +1113,7 @@ function viewHome() {
       h('button', { class: 'btn', type: 'button', onclick: () => { if (confirm('放棄這份作答？')) { S.session = null; persistSession(); go('home'); } } }, '放棄'))) : null;
 
   return h('div', {},
-    h('h1', {}, '題庫練習'),
-    h('div', { class: 'sub', id: 'bankSub' }, `${bankName()}｜${b.questions.length} 題`),
     bankCard(),
-    bankToolsCard(),
     syncCard(),
     installCard(),
     taskCard(),
@@ -1139,21 +1136,7 @@ function viewHome() {
   );
 }
 
-// 題庫工具卡片（更新題庫／新開題庫／匯出／還原內建），放在首頁最上面，緊接在題庫切換卡片後面
-function bankToolsCard() {
-  return h('div', { class: 'card' },
-      h('h2', {}, '題庫'),
-      h('div', { class: 'row', style: 'flex-wrap:wrap' },
-        h('button', { class: 'btn pri grow', type: 'button', onclick: pickUpdate }, '更新題庫（比對差異）'),
-        h('button', { class: 'btn grow', type: 'button', onclick: pickExcel }, '新開題庫（匯入 Excel）'),
-        h('button', { class: 'btn grow', type: 'button', onclick: exportExcel }, '匯出 Excel（含記憶法）'),
-        ACTIVE === MAIN_ID && window.BUILTIN && store.has(K('bank'))
-          ? h('button', { class: 'btn', type: 'button', onclick: restoreBuiltin }, '還原內建')
-          : null),
-      h('div', { class: 'hint' }, '「更新題庫」只更新目前這個題庫：工程會公布新版題庫時，選新的 Excel，會先列出和現在這份有哪裡不同，確認後才更換，這個題庫的做題紀錄與記憶法都會保留。「新開題庫」會用另一份 Excel 建立一個全新的題庫（進度從零開始、名稱自己取），原本的題庫不受影響，可在首頁最上面切換。Excel 需有「題目」「答案」欄；選填「課程名稱」「題型」「解析」。選擇題的選項寫在題目內，格式 (A)…(B)…(C)…(D)…'));
-}
-
-// 題庫切換卡片：下拉選單切換、新開、改名、刪除
+// 目前題庫卡片：切換、題數、新開、改名、刪除、更新、匯出，全部合在一起
 function bankCard() {
   const vis = visibleBanks();
   const sel = h('select', { id: 'bankSel', class: 'grow', style: 'min-width:0;width:100%' },
@@ -1161,9 +1144,11 @@ function bankCard() {
   sel.addEventListener('change', () => { if (switchBank(sel.value)) go('home'); else sel.value = ACTIVE; });
   const m = activeMeta();
   return h('div', { class: 'card', id: 'bankCard' },
-    h('h2', {}, '目前題庫'),
-    sel,
-    h('div', { class: 'row', style: 'margin-top:8px' },
+    h('div', { class: 'row between' },
+      h('h2', { style: 'margin:0' }, '目前題庫'),
+      h('span', { class: 'sub', id: 'bankCount' }, `共 ${S.bank.questions.length} 題`)),
+    h('div', { style: 'margin-top:8px' }, sel),
+    h('div', { class: 'row', style: 'margin-top:8px;flex-wrap:wrap' },
       h('button', { class: 'btn pri small grow', type: 'button', id: 'bankNew', onclick: pickExcel }, '＋新開題庫'),
       h('button', { class: 'btn small', type: 'button', id: 'bankRename', onclick: () => {
         const name = prompt('題庫名稱', m ? m.name : '');
@@ -1174,21 +1159,11 @@ function bankCard() {
         const name = m ? m.name : '';
         if (deleteBank(ACTIVE)) { toast(`已刪除題庫「${name}」`); go('home'); }
       } }, '刪除')),
-    vis.length <= 1 ? h('div', { class: 'hint' }, '至少要保留一個題庫，所以現在不能刪除。') : null);
-}
-
-// 還原內建題庫（只有 main 題庫、而且換過自訂題庫時才有這個按鈕）
-function restoreBuiltin() {
-  store.del(K('bank'));
-  setBank(buildBank(window.BUILTIN));
-  S.settings.units = null;
-  const m = activeMeta(), now = Date.now();
-  if (m) { m.srcT = now; m.t = now; saveBanks(); }   // src 變成 null 且 srcT 較新，同步時其他裝置也會還原
-  if (S.session && !S.session.ids.every(id => Q[id])) { S.session = null; persistSession(); }
-  store.del(K('set'));
-  syncSoon();
-  toast('已還原內建題庫');
-  go('home');
+    h('div', { class: 'row', style: 'margin-top:8px;flex-wrap:wrap' },
+      h('button', { class: 'btn small grow', type: 'button', id: 'bankUpdate', onclick: pickUpdate }, '更新題庫（比對差異）'),
+      h('button', { class: 'btn small grow', type: 'button', id: 'bankExport', onclick: exportExcel }, '匯出 Excel（含記憶法）')),
+    h('div', { class: 'hint' }, (vis.length <= 1 ? '至少要保留一個題庫，所以現在不能刪除。' : '') +
+      '「更新題庫」只更新目前這個題庫：選新的 Excel，會先列出和現在這份有哪裡不同，確認後才更換，做題紀錄與記憶法都保留。「新開題庫」會用另一份 Excel 建立全新進度的題庫。Excel 需有「題目」「答案」欄；選填「課程名稱」「題型」「解析」。選擇題的選項寫在題目內，格式 (A)…(B)…(C)…(D)…'));
 }
 
 /* ---- 念題目 ＋ 螢光筆 ---- */
