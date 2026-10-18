@@ -496,6 +496,48 @@ function pickReview(n) {   // 湊 n 題複習：到期的 → 快到期的 → �
   if (ids.length < n) for (const id of shuffle(S.bank.questions.map(q => q.id))) { if (ids.length >= n) break; if (!ids.includes(id)) ids.push(id); }
   return ids;
 }
+/* 依「考試日期」與「每日目標」算：照這個速度，考前念得完兩輪嗎？ */
+function planBlock() {
+  const g = goalInfo(), seen = store.get('exam.seen', {}), unseen = S.bank.questions.filter(q => !seen[q.id]).length;
+  const goalSets = S.settings.dailySets || 20, dayQ = goalSets * SET_SIZE, left = daysBetween(dateStr(), S.settings.examDate);
+  if (left <= 0) return null;
+  const MARGIN = 1.15;   // 多留 15%：答錯的題目要重練
+  const md = d => `${d.getMonth() + 1}/${d.getDate()}`;
+  const todayLeft = Math.max(0, dayQ - g.today);                      // 今天還能做的量
+  const cap = todayLeft + dayQ * (left - 1);                          // 到考試前一天為止，照目標最多能做幾題
+  const needSafe = Math.ceil(g.need * MARGIN);
+  const needSets = Math.ceil(g.need / SET_SIZE), capSets = Math.floor(cap / SET_SIZE);
+  const sugSets = Math.max(1, Math.ceil(needSafe / SET_SIZE / left));      // 建議每天至少幾組
+  const days = Math.ceil(Math.max(0, g.need - todayLeft) / dayQ);          // 照目標做，還要幾天
+  const fin = new Date(); fin.setDate(fin.getDate() + (g.need <= todayLeft ? 0 : days));
+  const lines = [];
+  let kind, head;
+  if (g.need === 0) { kind = 'ok'; head = '✔ 兩輪都念完了，之後照複習排程維持記憶就好。'; }
+  else if (cap >= needSafe) {
+    kind = 'ok';
+    head = `✔ 來得及：照每天 ${goalSets} 組，約 ${md(fin)} 就能念完兩輪（比考試早 ${Math.max(0, daysBetween(dateStr(fin), S.settings.examDate))} 天）。`;
+    lines.push(`還要念 ${needSets} 組，到考前最多能做 ${capSets} 組，已留 15% 給答錯重練。`);
+    if (goalSets > sugSets + 5) lines.push(`其實每天 ${sugSets} 組就夠了；維持 ${goalSets} 組會有餘裕，可以多複習或休息幾天。`);
+  } else if (cap >= g.need) {
+    kind = 'warn';
+    head = `⚠ 勉強趕得上：照每天 ${goalSets} 組，約 ${md(fin)} 念完，幾乎沒有餘裕。`;
+    lines.push(`答錯的題目要重練，建議把每日目標提高到 ${sugSets} 組，才有緩衝。`);
+  } else {
+    kind = 'bad';
+    head = `✘ 來不及：照每天 ${goalSets} 組，考前還差約 ${Math.ceil((g.need - cap) / SET_SIZE)} 組念不完。`;
+    lines.push(`建議把每日目標提高到至少 ${sugSets} 組（約 ${sugSets * SET_SIZE} 題）。`);
+    if (sugSets > 40) lines.push('如果每天做不到這麼多，建議先確保每題至少念過 1 輪，再用複習補第 2 輪。');
+  }
+  if (unseen > 0 && g.need > 0) {
+    const lastNew = new Date(); lastNew.setDate(lastNew.getDate() + Math.max(1, left - 7));
+    lines.push(`新題還有 ${unseen} 題沒碰過，第 2 輪需要間隔幾天，建議 ${md(lastNew)} 前把新題做完（每天約 ${Math.ceil(unseen / SET_SIZE / Math.max(1, left - 7))} 組新題），剩下的組數拿來複習。`);
+  }
+  const color = { ok: 'var(--ok)', warn: '#ea580c', bad: 'var(--bad)' }[kind];
+  return h('div', { style: `margin-top:12px;padding:10px 12px;border-radius:10px;border-left:5px solid ${color};background:var(--bg)` },
+    h('div', { style: `font-weight:700;color:${color}` }, head),
+    ...lines.map(l => h('div', { class: 'sub', style: 'margin-top:4px' }, l)));
+}
+
 function goalInfo() {   // 「12/5 前每題念兩輪」的進度與每天要做的量
   const seen = store.get('exam.seen', {}), total = S.bank.questions.length;
   let n1 = 0, n2 = 0, need = 0;
@@ -641,7 +683,8 @@ function taskCard() {
     h('button', { class: 'btn pri block go', type: 'button', style: 'margin-top:12px', onclick: () => inExam ? go('quiz') : go('study') },
       inExam ? `繼續考試（第 ${t.groupsDone + 1} 組）` : t.unseen === 0 ? '再來一組複習' : `開始第 ${t.groupsDone + 1} 組：先看答案`),
     h('div', { class: 'row', style: 'margin-top:10px;flex-wrap:wrap' }, h('span', { class: 'hint', style: 'margin:0' }, '考試日期'), dateInput,
-      h('span', { class: 'hint', style: 'margin:0 0 0 8px' }, '每日目標'), goalSel));
+      h('span', { class: 'hint', style: 'margin:0 0 0 8px' }, '每日目標'), goalSel),
+    planBlock());
 }
 
 /* ---- 預習畫面：這一組的題目＋答案＋記憶法，看完再按「開始考試」 ---- */
