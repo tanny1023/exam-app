@@ -1113,8 +1113,8 @@ function viewHome() {
       h('button', { class: 'btn', type: 'button', onclick: () => { if (confirm('放棄這份作答？')) { S.session = null; persistSession(); go('home'); } } }, '放棄'))) : null;
 
   return h('div', {},
-    bankCard(),
     syncCard(),
+    bankCard(),
     installCard(),
     taskCard(),
     reviewCard(),
