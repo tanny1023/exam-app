@@ -1239,6 +1239,24 @@ function chunkText(t, max = 50) {
 
 // 一句一句念；每句開始時亮起對應的段落。暫停時記住念到第幾句，繼續就從那一句重念
 // 語音失敗不會默默跳過：先重試 2 次，還是不行才跳過並提示；另有計時保護，句子卡住就強制往下
+// 暖機：手機的語音引擎（尤其是藍牙耳機、剛喚醒的音訊）剛啟動時會把第一個字吃掉。
+// 隔了一陣子才要念的時候，先念一個音量 0 的短句讓引擎醒過來，真正的內容就不會少字
+const WARM = { last: 0 };
+function warmUp(next) {
+  let done = false, timer = 0;
+  const fin = () => { if (done) return; done = true; clearTimeout(timer); setTimeout(next, 150); };
+  try {
+    const u = new SpeechSynthesisUtterance('，');
+    u.lang = 'zh-TW'; u.volume = 0; u.rate = 1;
+    const vs = speechSynthesis.getVoices(), v = vs.find(x => /zh[-_]TW/i.test(x.lang)) || vs.find(x => /^zh/i.test(x.lang));
+    if (v) u.voice = v;
+    u.onend = fin; u.onerror = fin;
+    window.__ttsW = u;
+    timer = setTimeout(fin, 900);
+    speechSynthesis.speak(u);
+  } catch (e) { fin(); }
+}
+
 function runQueue() {
   const my = ++ttsToken;
   const alive = () => my === ttsToken;
@@ -1263,7 +1281,7 @@ function runQueue() {
     let done = false, timer = 0;
     const dur = Math.round(text.length / (2 * S.settings.rate) * 1000) + 4000;   // 預估念完的時間（寬鬆）
     const arm = (ms, fn) => { clearTimeout(timer); timer = setTimeout(() => { if (!done && alive()) fn(); }, ms); };
-    const finish = next => { if (done) return; done = true; clearTimeout(timer); if (alive()) next(); };
+    const finish = next => { if (done) return; done = true; clearTimeout(timer); WARM.last = Date.now(); if (alive()) next(); };
     const cancelNow = () => { try { speechSynthesis.cancel(); } catch (e) {} };
     const retryOrSkip = why => {
       done = true; clearTimeout(timer);
@@ -1284,7 +1302,8 @@ function runQueue() {
     arm(Math.max(8000, dur), () => retryOrSkip('沒有開始念'));   // 一直沒開始念：重試
     speechSynthesis.speak(u);
   };
-  setTimeout(step, 200);   // cancel() 後要多等一下再念，太快會把開頭幾個字吃掉
+  // cancel() 後要多等一下再念，太快會把開頭幾個字吃掉；隔了一陣子沒念的話，再先暖機一下
+  setTimeout(() => { if (!alive()) return; if (Date.now() - WARM.last > 4000) warmUp(() => { if (alive()) step(); }); else step(); }, 200);
 }
 
 function speakItems(items) {
