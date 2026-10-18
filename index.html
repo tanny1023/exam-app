@@ -170,6 +170,7 @@ const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch (e) { return false; } },
   del(k) { try { localStorage.removeItem(k); } catch (e) {} },
+  has(k) { try { return localStorage.getItem(k) !== null; } catch (e) { return false; } },
 };
 
 function h(tag, props, ...kids) {
@@ -388,11 +389,62 @@ const S = {
 };
 const Q = {};      // id → 題目
 
-const saveSettings = () => { S.settings._t = Date.now(); store.set('exam.settings', S.settings); syncSoon(); };
-const persistSession = () => S.session ? store.set('exam.session', S.session) : store.del('exam.session');
+/* ============================================================
+ * 多題庫
+ * 每個題庫有自己的作答紀錄、錯題本、每日進度、自己編的記憶法、考試日期與每日目標。
+ *   exam.banks   ＝ 題庫清單 meta：[{ id, name, examDate, dailySets, srcT, t, del }]（會同步；del 是刪除墓碑）
+ *   exam.active  ＝ 目前題庫 id（只存在這台裝置，不同步）
+ *   id 'main' ＝ 原本的題庫，沿用舊的 exam.seen、exam.stats… 鍵（舊使用者不用搬資料）
+ *   其他題庫的鍵 ＝ exam.b.<id>.<seen|daily|stats|wrong|wrongT|mine|alias|session|set|bank>
+ * 程式裡一律用 K('seen') 取「目前題庫」的鍵。
+ * ============================================================ */
+const MAIN_ID = 'main', MAIN_NAME = '品管班（土建）題庫', DEFAULT_EXAM_DATE = '2026-12-05';
+const BANK_NAMES = ['seen', 'daily', 'stats', 'wrong', 'wrongT', 'mine', 'alias', 'session', 'set', 'bank'];
+const PER_BANK_SETTINGS = ['examDate', 'dailySets'];   // 這兩項存在題庫 meta，不寫進全域設定
+let ACTIVE = MAIN_ID;   // 目前題庫 id
+let BANKS = [];         // 題庫 meta（含已刪除的墓碑）
+const keyOf = (id, name) => id === MAIN_ID ? 'exam.' + name : `exam.b.${id}.${name}`;
+const K = name => keyOf(ACTIVE, name);
+const visibleBanks = () => BANKS.filter(b => !b.del);
+const getMeta = id => BANKS.find(b => b.id === id);
+const activeMeta = () => getMeta(ACTIVE);
+const saveBanks = () => store.set('exam.banks', BANKS);
+const newBankId = () => 'b' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+// 舊使用者（沒有 exam.banks）：把現有資料視為 main 題庫，考試日期與每日目標從舊設定帶入
+// t：舊設定裡真的有考試日期／每日目標的 → 至少 1（贏過全新裝置的預設值 0，同步時才不會被預設值蓋掉）
+const legacyMainMeta = (st, legacy) => ({ id: MAIN_ID, name: MAIN_NAME, examDate: (st && st.examDate) || DEFAULT_EXAM_DATE, dailySets: (st && st.dailySets) || 20, srcT: 0, t: (st && st._t) || (legacy ? 1 : 0) });
+// 保證至少有一個沒被刪除的題庫（兩台裝置各刪一個、合併後都被刪光時，把 main 救回來）
+function ensureBanks(list) {
+  list = (list || []).map(b => Object.assign({}, b));
+  if (list.some(b => !b.del)) return list;
+  const m = list.find(b => b.id === MAIN_ID);
+  if (m) { delete m.del; m.t = Date.now(); m.srcT = Date.now(); return list; }
+  return list.concat([Object.assign(legacyMainMeta(null), { t: Date.now() })]);
+}
+function initBanks() {
+  const saved = store.get('exam.banks', null);
+  const raw = store.get('exam.settings', null);
+  BANKS = ensureBanks(Array.isArray(saved) && saved.length ? saved : [legacyMainMeta(S.settings, !!(raw && (raw.examDate || raw.dailySets)))]);
+  saveBanks();
+}
+const sharedSettings = () => { const o = Object.assign({}, S.settings); PER_BANK_SETTINGS.forEach(k => delete o[k]); return o; };
+const applyMetaToSettings = m => { S.settings.examDate = m.examDate || DEFAULT_EXAM_DATE; S.settings.dailySets = m.dailySets || 20; };
+
+// 設定存檔：共用設定（速度、自動念…）寫全域；考試日期與每日目標寫進目前題庫的 meta（有變才更新時間，避免蓋掉別台裝置的設定）
+function saveSettings() {
+  const sh = sharedSettings(), old = store.get('exam.settings', {});
+  const strip = o => { o = Object.assign({}, o); delete o._t; PER_BANK_SETTINGS.forEach(k => delete o[k]); return JSON.stringify(o); };
+  if (strip(old) !== strip(sh) || old._t == null) { S.settings._t = Date.now(); sh._t = S.settings._t; store.set('exam.settings', sh); }
+  const m = activeMeta();
+  if (m && (m.examDate !== S.settings.examDate || m.dailySets !== S.settings.dailySets)) {
+    m.examDate = S.settings.examDate; m.dailySets = S.settings.dailySets; m.t = Date.now(); saveBanks();
+  }
+  syncSoon();
+}
+const persistSession = () => S.session ? store.set(K('session'), S.session) : store.del(K('session'));
 
 function getWrong() {
-  const ids = store.get('exam.wrong', []).filter(id => Q[id]);
+  const ids = store.get(K('wrong'), []).filter(id => Q[id]);
   return new Set(ids);
 }
 const BOX_DAYS = [0, 1, 3, 7, 14];   // 間隔複習：答對一次就升一格，下次複習的間隔拉長；答錯回到第 0 格（馬上要複習）
@@ -400,23 +452,23 @@ function record(q, ok) {
   const w = getWrong();
   if (!ok) w.add(q.id);
   else if (S.session && (S.session.from === 'wrong' || S.session.from === 'review')) w.delete(q.id);
-  store.set('exam.wrong', [...w]);
-  const wt = store.get('exam.wrongT', {});
+  store.set(K('wrong'), [...w]);
+  const wt = store.get(K('wrongT'), {});
   wt[q.id] = { in: w.has(q.id), t: Date.now() };
-  store.set('exam.wrongT', wt);
-  const stats = store.get('exam.stats', {}), st = stats[q.id] || { r: 0, w: 0, box: 0 };
+  store.set(K('wrongT'), wt);
+  const stats = store.get(K('stats'), {}), st = stats[q.id] || { r: 0, w: 0, box: 0 };
   if (ok) { st.r++; st.box = Math.min(st.box + 1, BOX_DAYS.length - 1); } else { st.w++; st.box = 0; }
   st.ok = ok; st.t = Date.now();
   st.due = Math.min(Date.now() + BOX_DAYS[st.box] * 864e5, new Date(S.settings.examDate + 'T00:00:00').getTime());   // 最晚不超過考試當天
   stats[q.id] = st;
-  store.set('exam.stats', stats);
+  store.set(K('stats'), stats);
   // 練習紀錄：做過哪些題、今天做了幾題
-  const seen = store.get('exam.seen', {});
+  const seen = store.get(K('seen'), {});
   seen[q.id] = (seen[q.id] || 0) + 1;
-  store.set('exam.seen', seen);
-  const daily = store.get('exam.daily', {}), day = dateStr();
+  store.set(K('seen'), seen);
+  const daily = store.get(K('daily'), {}), day = dateStr();
   daily[day] = (daily[day] || 0) + 1;
-  store.set('exam.daily', daily);
+  store.set(K('daily'), daily);
   syncSoon();
 }
 
@@ -437,7 +489,7 @@ function calcStreak(daily) {
 }
 
 function taskInfo() {
-  const seen = store.get('exam.seen', {}), daily = store.get('exam.daily', {}), today = dateStr();
+  const seen = store.get(K('seen'), {}), daily = store.get(K('daily'), {}), today = dateStr();
   const unseen = S.bank.questions.filter(q => !seen[q.id]);
   const left = daysBetween(today, S.settings.examDate);
   const total = S.bank.questions.length;
@@ -448,13 +500,13 @@ function taskInfo() {
 /* ---- 一組 5 題：先預習（看答案＋記憶法）→ 再考同一份 5 題 ---- */
 const SET_SIZE = 5;
 function pickSet() {
-  const seen = store.get('exam.seen', {});
+  const seen = store.get(K('seen'), {});
   const ids = S.bank.questions.filter(q => !seen[q.id]).slice(0, SET_SIZE).map(q => q.id);     // 沒做過的，依章節順序
   return ids.length < SET_SIZE ? ids.concat(pickReview(SET_SIZE).filter(id => !ids.includes(id))).slice(0, SET_SIZE) : ids;
 }
 function curSet() {   // 目前這一組的題目；存起來，中途離開再回來題目不會變
-  let s = store.get('exam.set', null);
-  if (!s || s.ids.length !== SET_SIZE || !s.ids.every(id => Q[id])) { s = { ids: pickSet() }; store.set('exam.set', s); }
+  let s = store.get(K('set'), null);
+  if (!s || s.ids.length !== SET_SIZE || !s.ids.every(id => Q[id])) { s = { ids: pickSet() }; store.set(K('set'), s); }
   return s;
 }
 const setNo = () => taskInfo().groupsDone + 1;
@@ -469,23 +521,23 @@ function mnemoTable() {
   return MNEMO_ID;
 }
 // 題庫更新後序號會變，所以用題目本身對應；文字被小幅修改的題目靠 exam.alias（新 id → 舊 id）繼續用原本的記憶法
-const baseMnemo = q => { const t = mnemoTable(); return t[q.id] || t[store.get('exam.alias', {})[q.id]] || ''; };
-const myMnemo = q => store.get('exam.mine', {})[q.id];            // 自己編輯的版本：{ text, t }，text 為 null 表示已還原預設
+const baseMnemo = q => { const t = mnemoTable(); return t[q.id] || t[store.get(K('alias'), {})[q.id]] || ''; };
+const myMnemo = q => store.get(K('mine'), {})[q.id];            // 自己編輯的版本：{ text, t }，text 為 null 表示已還原預設
 const mnemoOf = q => { const m = myMnemo(q); return m && m.text != null ? m.text : baseMnemo(q); };
 function saveMine(q, text) {
-  const mine = store.get('exam.mine', {});
+  const mine = store.get(K('mine'), {});
   mine[q.id] = { text: text.trim() || null, t: Date.now() };
-  store.set('exam.mine', mine);
+  store.set(K('mine'), mine);
   syncSoon();
 }
 
 /* ---- 考前複習 ---- */
 function dueIds() {   // 到期該複習的題目（舊版只有錯題本、沒有紀錄的錯題，也算到期）
-  const stats = store.get('exam.stats', {}), wrong = getWrong(), now = Date.now();
+  const stats = store.get(K('stats'), {}), wrong = getWrong(), now = Date.now();
   return S.bank.questions.map(q => q.id).filter(id => stats[id] ? stats[id].due <= now : wrong.has(id));
 }
 function hardIds() {  // 易錯題：錯過至少 2 次，而且錯的比對的多
-  const stats = store.get('exam.stats', {});
+  const stats = store.get(K('stats'), {});
   return S.bank.questions.map(q => q.id).filter(id => stats[id] && stats[id].w >= 2 && stats[id].w >= stats[id].r);
 }
 /* 依遺忘曲線排出建議複習的題目：預估記憶剩越少的排越前面。
@@ -493,7 +545,7 @@ function hardIds() {  // 易錯題：錯過至少 2 次，而且錯的比對的�
  * 預估記憶 R = 0.9 ^ (離上次多久 ÷ 排定的間隔)：剛好到複習時間約剩 90%，拖越久越低。 */
 const DAY = 864e5, GOAL_PASSES = 2;   // 目標：考前每題至少念過 2 輪
 function reviewQueue() {
-  const stats = store.get('exam.stats', {}), seen = store.get('exam.seen', {}), wrong = getWrong(), now = Date.now();
+  const stats = store.get(K('stats'), {}), seen = store.get(K('seen'), {}), wrong = getWrong(), now = Date.now();
   const due = [], ahead = [];
   for (const q of S.bank.questions) {
     const st = stats[q.id];
@@ -514,7 +566,7 @@ function pickReview(n) {   // 湊 n 題複習：到期的 → 快到期的 → �
 }
 /* 依「考試日期」與「每日目標」算：照這個速度，考前念得完兩輪嗎？ */
 function planBlock() {
-  const g = goalInfo(), seen = store.get('exam.seen', {}), unseen = S.bank.questions.filter(q => !seen[q.id]).length;
+  const g = goalInfo(), seen = store.get(K('seen'), {}), unseen = S.bank.questions.filter(q => !seen[q.id]).length;
   const goalSets = S.settings.dailySets || 20, dayQ = goalSets * SET_SIZE, left = daysBetween(dateStr(), S.settings.examDate);
   if (left <= 0) return null;
   const MARGIN = 1.15;   // 多留 15%：答錯的題目要重練
@@ -555,11 +607,11 @@ function planBlock() {
 }
 
 function goalInfo() {   // 「12/5 前每題念兩輪」的進度與每天要做的量
-  const seen = store.get('exam.seen', {}), total = S.bank.questions.length;
+  const seen = store.get(K('seen'), {}), total = S.bank.questions.length;
   let n1 = 0, n2 = 0, need = 0;
   for (const q of S.bank.questions) { const c = seen[q.id] || 0; if (c >= 1) n1++; if (c >= GOAL_PASSES) n2++; need += Math.max(0, GOAL_PASSES - c); }
   const left = Math.max(1, daysBetween(dateStr(), S.settings.examDate));
-  return { total, n1, n2, need, left, perDay: Math.ceil(need / left), today: store.get('exam.daily', {})[dateStr()] || 0 };
+  return { total, n1, n2, need, left, perDay: Math.ceil(need / left), today: store.get(K('daily'), {})[dateStr()] || 0 };
 }
 function startMock() {
   const n = Math.min(S.settings.mockCount, S.bank.questions.length);
@@ -573,17 +625,50 @@ function setBank(bank) {
   bank.questions.forEach(q => Q[q.id] = q);
 }
 
-function loadBank() {
-  const saved = store.get('exam.bank', null);
+// 讀出某個題庫（沒指定就讀目前這個）。main 沒有自訂題庫時用內建的；其他題庫一定有自己的 src，讀不到就回傳 null
+function loadBank(id = ACTIVE) {
+  const key = keyOf(id, 'bank'), saved = store.get(key, null);
   if (saved) {
-    try { return buildBank(saved); } catch (e) { store.del('exam.bank'); }
+    try { return buildBank(saved); } catch (e) { if (id !== MAIN_ID) return null; store.del(key); }
   }
-  if (window.BUILTIN) return buildBank(window.BUILTIN);
+  if (id === MAIN_ID && window.BUILTIN) return buildBank(window.BUILTIN);
   return null;
 }
 
+// 目前題庫的作答中進度；題庫換過、題目對不上就當作沒有
+const loadSession = () => { const s = store.get(K('session'), null); return s && s.ids && s.ids.every(id => Q[id]) ? s : null; };
+
+// 切換到另一個題庫：換題目、換考試日期與每日目標、換進行中的作答。讀不到題庫就維持原狀並回傳 false
+function switchBank(id, quiet) {
+  const m = getMeta(id);
+  if (!m || m.del) return false;
+  const bank = loadBank(id);
+  if (!bank) { if (!quiet) toast('這個題庫讀取失敗，無法切換'); return false; }
+  stopSpeak();
+  const cur = activeMeta();
+  if (S.session && cur && !cur.del) persistSession();   // 離開前把這個題庫進行中的作答存起來（已刪除的題庫不要存）
+  ACTIVE = id;
+  store.set('exam.active', id);
+  setBank(bank);
+  applyMetaToSettings(m);
+  S.settings.units = null;
+  S.session = loadSession();
+  S.study = S.result = S.update = S.newBank = null;
+  return true;
+}
+
+// 啟動／同步後：確認目前題庫還在，否則切到第一個讀得出來的題庫（優先 main）
+function pickActiveBank() {
+  const vis = visibleBanks(), want = store.get('exam.active', null);
+  const order = [want, MAIN_ID].concat(vis.map(b => b.id)).filter((id, i, a) => id && a.indexOf(id) === i && vis.some(b => b.id === id));
+  for (const id of order) if (switchBank(id, true)) return true;
+  return false;
+}
+
+const bankName = () => { const m = activeMeta(); return (m && m.name) || (S.bank && S.bank.name) || '題庫'; };
+
 /* ============================================================
- * 匯入 Excel
+ * 新開題庫（匯入 Excel）
  * ============================================================ */
 function readExcel(buf, filename) {
   const wb = XLSX.read(buf, { type: 'array' });
@@ -591,16 +676,38 @@ function readExcel(buf, filename) {
   return { name: filename.replace(/\.(xlsx|xls|csv)$/i, ''), sheets };
 }
 
-function importBuffer(buf, filename) {
-  const src = readExcel(buf, filename);
-  const bank = buildBank(src);        // 失敗會丟例外，不會蓋掉原本的題庫
-  const saved = store.set('exam.bank', src);
-  setBank(bank);
-  S.settings.units = null;
-  saveSettings();
-  store.del('exam.session');
-  S.session = null;
-  return { bank, saved };
+// 建立全新的題庫（全新進度）並切換過去。題庫太大存不進手機就不建立，不會動到原本的題庫
+function createBank({ name, src, examDate, dailySets }) {
+  const id = newBankId(), now = Date.now();
+  if (!store.set(keyOf(id, 'bank'), src)) { store.del(keyOf(id, 'bank')); return null; }
+  BANKS.push({ id, name: name.trim() || '新題庫', examDate: examDate || S.settings.examDate, dailySets: dailySets || S.settings.dailySets || 20, srcT: now, t: now });
+  saveBanks();
+  if (!switchBank(id, true)) {   // 理論上不會發生：剛建立的題庫讀不出來，就整個撤銷
+    BANKS = BANKS.filter(b => b.id !== id); saveBanks(); BANK_NAMES.forEach(n => store.del(keyOf(id, n)));
+    return null;
+  }
+  syncSoon();
+  return id;
+}
+
+function renameBank(id, name) {
+  const m = getMeta(id);
+  name = (name || '').trim();
+  if (!m || !name || name === m.name) return false;
+  m.name = name; m.t = Date.now(); saveBanks(); syncSoon();
+  return true;
+}
+
+// 刪除題庫：進度一起刪，留下墓碑讓其他裝置也刪。至少要留一個題庫
+function deleteBank(id) {
+  const m = getMeta(id);
+  if (!m || m.del || visibleBanks().length <= 1) return false;
+  m.del = true; m.t = Date.now();
+  BANK_NAMES.forEach(n => store.del(keyOf(id, n)));
+  saveBanks();
+  if (ACTIVE === id && !pickActiveBank()) { m.del = false; saveBanks(); return false; }
+  syncSoon();
+  return true;
 }
 
 function pickExcel() {
@@ -609,17 +716,47 @@ function pickExcel() {
     const f = input.files[0];
     if (!f) return;
     try {
-      const { bank, saved } = importBuffer(await f.arrayBuffer(), f.name);
-      let msg = `匯入成功：共 ${bank.questions.length} 題`;
-      if (bank.skipped) msg += `\n有 ${bank.skipped} 題格式無法辨識，已略過`;
-      if (!saved) msg += '\n題庫太大，無法保存在手機上，關閉後需要重新匯入';
-      toast(msg, 5000);
-      go('home');
+      const src = readExcel(await f.arrayBuffer(), f.name);
+      const bank = buildBank(src);        // 失敗會丟例外，不會動到任何題庫
+      S.newBank = { src, bank, name: src.name, examDate: S.settings.examDate };
+      go('newbank');
     } catch (e) {
-      toast('匯入失敗：' + e.message, 6000);
+      toast('讀取失敗：' + e.message, 6000);
     }
   });
   input.click();
+}
+
+function viewNewBank() {
+  const nb = S.newBank;
+  if (!nb) return viewHome();
+  const info = bankInfo(nb.bank), css = 'border:1px solid var(--line);background:var(--card);color:inherit;border-radius:10px;padding:8px 10px;font:inherit;min-height:44px;width:100%';
+  const nameIn = h('input', { type: 'text', value: nb.name, id: 'nbName', maxlength: 40, style: css });
+  const dateIn = h('input', { type: 'date', value: nb.examDate, id: 'nbDate', style: css });
+  const create = () => {
+    const name = nameIn.value.trim();
+    if (!name) { toast('請輸入題庫名稱'); return; }
+    if (!dateIn.value) { toast('請選擇考試日期'); return; }
+    const bank = nb.bank;
+    const id = createBank({ name, src: nb.src, examDate: dateIn.value, dailySets: S.settings.dailySets });
+    if (!id) { toast('題庫太大，無法保存在手機上，沒有建立', 6000); return; }
+    let msg = `已新開題庫「${name}」：共 ${bank.questions.length} 題`;
+    if (bank.skipped) msg += `\n有 ${bank.skipped} 題格式無法辨識，已略過`;
+    toast(msg, 5000);
+    go('home');
+  };
+  return h('div', {},
+    h('div', { class: 'row between' },
+      h('button', { class: 'btn small', type: 'button', onclick: () => { S.newBank = null; go('home'); } }, '‹ 取消'),
+      h('b', {}, '新開題庫'), h('span', { style: 'width:64px' })),
+    h('div', { class: 'card' },
+      h('div', { class: 'sub' }, `讀到 ${info.n} 題${info.date ? '（列印日期 ' + info.date + '）' : ''}${nb.bank.skipped ? `，另有 ${nb.bank.skipped} 題格式無法辨識` : ''}`),
+      h('div', { style: 'margin-top:12px' }, h('div', { class: 'sub' }, '題庫名稱'), nameIn),
+      h('div', { style: 'margin-top:12px' }, h('div', { class: 'sub' }, '考試日期（預設沿用目前題庫，之後也能在首頁改）'), dateIn),
+      h('div', { class: 'hint' }, '會建立一個全新的題庫，進度、錯題本、每日目標都從零開始；原本的題庫與進度完全不受影響，隨時可以在首頁最上面切換。')),
+    h('div', { class: 'nav' },
+      h('button', { class: 'btn', type: 'button', onclick: () => { S.newBank = null; go('home'); } }, '先不要'),
+      h('button', { class: 'btn pri grow', type: 'button', style: 'min-height:52px', id: 'nbCreate', onclick: create }, '建立題庫')));
 }
 
 /* ---- 更新題庫：選新版 Excel → 列出和現在這份的差異 → 確認後才更換，做題紀錄保留 ---- */
@@ -664,25 +801,28 @@ function prepareUpdate(buf, filename) {
 }
 const bankInfo = b => { const t = b.src && b.src.sheets[0] && b.src.sheets[0][1] && String(b.src.sheets[0][1][0] || ''); return { n: b.questions.length, date: /列印日期[:：]?\s*(\S+)/.test(t || '') ? RegExp.$1 : '' }; };
 
+// 更新「目前這個題庫」：做題紀錄搬到新題，換上新版題庫，並更新 meta 的 srcT／t 讓同步把新題庫帶到其他裝置
 function applyUpdate(u) {
-  const now = Date.now(), alias = store.get('exam.alias', {});
-  const stats = store.get('exam.stats', {}), seen = store.get('exam.seen', {}), wt = store.get('exam.wrongT', {}), mine = store.get('exam.mine', {});
-  let wrong = store.get('exam.wrong', []);
+  if (!store.set(K('bank'), u.src)) { toast('題庫太大，無法保存在手機上，沒有更新', 6000); return false; }
+  const now = Date.now(), alias = store.get(K('alias'), {});
+  const stats = store.get(K('stats'), {}), seen = store.get(K('seen'), {}), wt = store.get(K('wrongT'), {}), mine = store.get(K('mine'), {});
+  let wrong = store.get(K('wrong'), []);
   for (const { o, n } of u.diff.pairs) {   // 文字被修改的題目：做題紀錄與自己編的記憶法搬到新題
     for (const m of [stats, seen, mine]) if (m[o.id] !== undefined) { m[n.id] = m[o.id]; delete m[o.id]; }
     if (wt[o.id]) { wt[n.id] = Object.assign({}, wt[o.id], { t: now }); wt[o.id] = { in: false, t: now }; }
     wrong = wrong.map(id => id === o.id ? n.id : id);
     alias[n.id] = alias[o.id] || o.id;
   }
-  store.set('exam.stats', stats); store.set('exam.seen', seen); store.set('exam.wrongT', wt); store.set('exam.mine', mine);
-  store.set('exam.wrong', [...new Set(wrong)]); store.set('exam.alias', alias);
-  store.set('exam.bank', u.src);
+  store.set(K('stats'), stats); store.set(K('seen'), seen); store.set(K('wrongT'), wt); store.set(K('mine'), mine);
+  store.set(K('wrong'), [...new Set(wrong)]); store.set(K('alias'), alias);
   setBank(u.bank);
   S.settings.units = null;
-  saveSettings();
+  const m = activeMeta();
+  if (m) { m.srcT = now; m.t = now; saveBanks(); }
   if (S.session && !S.session.ids.every(id => Q[id])) { S.session = null; persistSession(); }
-  store.del('exam.set');
+  store.del(K('set'));
   syncSoon();
+  return true;
 }
 
 function pickUpdate() {
@@ -737,7 +877,7 @@ function viewUpdate() {
     h('div', { class: 'nav' },
       h('button', { class: 'btn', type: 'button', onclick: () => { S.update = null; go('home'); } }, '先不要'),
       h('button', { class: 'btn pri grow', type: 'button', style: 'min-height:52px', disabled: total === 0,
-        onclick: () => { applyUpdate(u); S.update = null; toast(`題庫已更新：共 ${S.bank.questions.length} 題`, 4000); go('home'); } }, '確定更新題庫')));
+        onclick: () => { if (!applyUpdate(u)) return; S.update = null; toast(`題庫已更新：共 ${S.bank.questions.length} 題`, 4000); go('home'); } }, '確定更新題庫')));
 }
 
 /* ---- 匯出 Excel：原本的題庫＋多一欄「記憶法」 ---- */
@@ -764,7 +904,8 @@ function buildExportWorkbook() {
 
 function exportExcel() {
   try {
-    XLSX.writeFile(buildExportWorkbook(), `題庫_含記憶法_${dateStr()}.xlsx`);
+    const nm = bankName().replace(/[\\/:*?"<>|]/g, '').trim().slice(0, 30) || '題庫';
+    XLSX.writeFile(buildExportWorkbook(), `${nm}_含記憶法_${dateStr()}.xlsx`);
     toast('已匯出，檔案在你的「下載」資料夾');
   } catch (e) { toast('匯出失敗：' + e.message, 5000); }
 }
@@ -776,7 +917,7 @@ function go(screen, keepScroll) {
   S.screen = screen;
   if (screen === 'home' || screen === 'result') S.study = null;
   if (screen !== 'quiz' || !keepScroll) stopSpeak();   // 換題或離開作答畫面就停止念題
-  const view = { home: viewHome, study: viewStudy, quiz: viewQuiz, result: viewResult, update: viewUpdate }[screen];
+  const view = { home: viewHome, study: viewStudy, quiz: viewQuiz, result: viewResult, update: viewUpdate, newbank: viewNewBank }[screen];
   $app.replaceChildren(view());
   if (!keepScroll) window.scrollTo(0, 0);
   if (screen === 'quiz') {
@@ -806,7 +947,7 @@ function taskCard() {
     saveSettings();
     go('home', true);
   });
-  const goalSets = S.settings.dailySets || 20, todaySets = Math.floor((store.get('exam.daily', {})[dateStr()] || 0) / SET_SIZE);   // 每答 5 題算 1 組（新題＋複習都算）
+  const goalSets = S.settings.dailySets || 20, todaySets = Math.floor((store.get(K('daily'), {})[dateStr()] || 0) / SET_SIZE);   // 每答 5 題算 1 組（新題＋複習都算）
   const goalSel = h('select', { style: dateInput.style.cssText }, [5, 10, 15, 20, 25, 30, 40, 50].map(n => h('option', { value: n, selected: n === goalSets }, n + ' 組')));
   goalSel.addEventListener('change', () => { S.settings.dailySets = +goalSel.value; saveSettings(); go('home', true); });
   const dayText = t.left > 0 ? `距離考試還有 ${t.left} 天` : t.left === 0 ? '今天考試，加油！' : '考試日期已過';
@@ -890,7 +1031,7 @@ function viewStudy() {
 /* ---- 已預習的單元：預習過的題目，可以依單元再練習或再考 ---- */
 const REVIEW_BATCH = SET_SIZE;   // 複習時，一次出幾題（跟每組一樣）
 function previewedUnits() {
-  const seen = store.get('exam.seen', {});
+  const seen = store.get(K('seen'), {});
   const rows = S.bank.units.map(u => {
     const ids = S.bank.questions.filter(q => q.unit === u.name).map(q => q.id);
     return { name: u.name, total: ids.length, done: ids.filter(id => seen[id]) };
@@ -973,7 +1114,8 @@ function viewHome() {
 
   return h('div', {},
     h('h1', {}, '題庫練習'),
-    h('div', { class: 'sub' }, `${b.name}｜${b.questions.length} 題`),
+    h('div', { class: 'sub', id: 'bankSub' }, `${bankName()}｜${b.questions.length} 題`),
+    bankCard(),
     syncCard(),
     installCard(),
     taskCard(),
@@ -985,10 +1127,10 @@ function viewHome() {
         h('div', { class: 'row' },
           h('button', { class: 'btn small', type: 'button', disabled: book.length === 0, onclick: () => {
             if (!confirm('清空錯題本？今天排程要複習的題目也會延到明天。')) return;
-            const wt = store.get('exam.wrongT', {}), now = Date.now(), stats = store.get('exam.stats', {});
+            const wt = store.get(K('wrongT'), {}), now = Date.now(), stats = store.get(K('stats'), {});
             [...wrong].forEach(id => { wt[id] = { in: false, t: now }; });
             dueSet.forEach(id => { if (stats[id]) stats[id].due = now + 864e5; });   // 沒登記排程的舊錯題，已由上面從錯題本移除
-            store.set('exam.wrongT', wt); store.set('exam.wrong', []); store.set('exam.stats', stats);
+            store.set(K('wrongT'), wt); store.set(K('wrong'), []); store.set(K('stats'), stats);
             syncSoon(); go('home', true);
           } }, '清空'),
           h('button', { class: 'btn pri small', type: 'button', disabled: book.length === 0, onclick: () => startSession(shuffle(book.filter(id => dueSet.has(id))).concat(shuffle(book.filter(id => !dueSet.has(id)))), 'exam', 'wrong') }, '測驗錯題'))),
@@ -997,12 +1139,50 @@ function viewHome() {
       h('h2', {}, '題庫'),
       h('div', { class: 'row', style: 'flex-wrap:wrap' },
         h('button', { class: 'btn pri grow', type: 'button', onclick: pickUpdate }, '更新題庫（比對差異）'),
-        h('button', { class: 'btn grow', type: 'button', onclick: pickExcel }, '匯入 Excel 題庫'),
+        h('button', { class: 'btn grow', type: 'button', onclick: pickExcel }, '新開題庫（匯入 Excel）'),
         h('button', { class: 'btn grow', type: 'button', onclick: exportExcel }, '匯出 Excel（含記憶法）'),
-        window.BUILTIN && store.get('exam.bank', null)
-          ? h('button', { class: 'btn', type: 'button', onclick: () => { store.del('exam.bank'); setBank(buildBank(window.BUILTIN)); S.settings.units = null; toast('已還原內建題庫'); go('home'); } }, '還原內建')
+        ACTIVE === MAIN_ID && window.BUILTIN && store.has(K('bank'))
+          ? h('button', { class: 'btn', type: 'button', onclick: restoreBuiltin }, '還原內建')
           : null),
-      h('div', { class: 'hint' }, '工程會公布新版題庫時，按「更新題庫」選新的 Excel：會先列出和現在這份有哪裡不同，確認後才更換，做題紀錄與記憶法都會保留。「匯入」則是直接換成另一份題庫。Excel 需有「題目」「答案」欄；選填「課程名稱」「題型」「解析」。選擇題的選項寫在題目內，格式 (A)…(B)…(C)…(D)…')));
+      h('div', { class: 'hint' }, '「更新題庫」只更新目前這個題庫：工程會公布新版題庫時，選新的 Excel，會先列出和現在這份有哪裡不同，確認後才更換，這個題庫的做題紀錄與記憶法都會保留。「新開題庫」會用另一份 Excel 建立一個全新的題庫（進度從零開始、名稱自己取），原本的題庫不受影響，可在首頁最上面切換。Excel 需有「題目」「答案」欄；選填「課程名稱」「題型」「解析」。選擇題的選項寫在題目內，格式 (A)…(B)…(C)…(D)…')));
+}
+
+// 題庫切換卡片：下拉選單切換、新開、改名、刪除
+function bankCard() {
+  const vis = visibleBanks();
+  const sel = h('select', { id: 'bankSel', class: 'grow', style: 'min-width:0;width:100%' },
+    vis.map(b => h('option', { value: b.id, selected: b.id === ACTIVE }, b.name)));
+  sel.addEventListener('change', () => { if (switchBank(sel.value)) go('home'); else sel.value = ACTIVE; });
+  const m = activeMeta();
+  return h('div', { class: 'card', id: 'bankCard' },
+    h('h2', {}, '目前題庫'),
+    sel,
+    h('div', { class: 'row', style: 'margin-top:8px' },
+      h('button', { class: 'btn pri small grow', type: 'button', id: 'bankNew', onclick: pickExcel }, '＋新開題庫'),
+      h('button', { class: 'btn small', type: 'button', id: 'bankRename', onclick: () => {
+        const name = prompt('題庫名稱', m ? m.name : '');
+        if (name != null && renameBank(ACTIVE, name)) go('home', true);
+      } }, '改名'),
+      h('button', { class: 'btn small', type: 'button', id: 'bankDel', disabled: vis.length <= 1, onclick: () => {
+        if (!confirm(`刪除題庫「${m ? m.name : ''}」？\n\n這個題庫的作答進度、錯題本、自己編的記憶法都會一起刪掉，無法復原。\n如果你有登入 Google 帳號，其他裝置上的這個題庫也會一起刪除。`)) return;
+        const name = m ? m.name : '';
+        if (deleteBank(ACTIVE)) { toast(`已刪除題庫「${name}」`); go('home'); }
+      } }, '刪除')),
+    vis.length <= 1 ? h('div', { class: 'hint' }, '至少要保留一個題庫，所以現在不能刪除。') : null);
+}
+
+// 還原內建題庫（只有 main 題庫、而且換過自訂題庫時才有這個按鈕）
+function restoreBuiltin() {
+  store.del(K('bank'));
+  setBank(buildBank(window.BUILTIN));
+  S.settings.units = null;
+  const m = activeMeta(), now = Date.now();
+  if (m) { m.srcT = now; m.t = now; saveBanks(); }   // src 變成 null 且 srcT 較新，同步時其他裝置也會還原
+  if (S.session && !S.session.ids.every(id => Q[id])) { S.session = null; persistSession(); }
+  store.del(K('set'));
+  syncSoon();
+  toast('已還原內建題庫');
+  go('home');
 }
 
 /* ---- 念題目 ＋ 螢光筆 ---- */
@@ -1373,7 +1553,7 @@ function finishSession(confirmUnanswered, timeUp) {
     const q = Q[id], T = TYPES[q.type];
     if (T.isAnswered(q, s.answers[id]) && !(s.rec && s.rec[id])) record(q, T.isCorrect(q, s.answers[id]));
   }
-  if (s.from === 'set') store.del('exam.set');   // 這一組考完了，下一組會抽新的題目
+  if (s.from === 'set') store.del(K('set'));   // 這一組考完了，下一組會抽新的題目
   S.result = { ids: s.ids, answers: s.answers, mode: s.mode, from: s.from, task: s.task, timeUp: !!timeUp, elapsed: s.elapsed || 0, away: s.away || 0, awaySec: s.awaySec || 0 };
   S.session = null;
   persistSession();
@@ -1482,23 +1662,47 @@ document.addEventListener('visibilitychange', () => {
 const SYNC = { user: null, db: null, auth: null, ready: false, loading: false, busy: false, msg: '', timer: 0, last: store.get('exam.syncLast', 0) };
 const syncOn = () => !!(window.FIREBASE_CONFIG && window.FIREBASE_CONFIG.apiKey);
 
-// 要同步的內容：作答紀錄、錯題、每日進度、複習排程、設定（進行到一半的作答與這一組題目不同步）
-function collectState() {
-  return {
-    v: 1, t: Date.now(),
-    seen: store.get('exam.seen', {}), daily: store.get('exam.daily', {}), stats: store.get('exam.stats', {}),
-    wrong: store.get('exam.wrong', []), wrongT: store.get('exam.wrongT', {}),
-    mine: store.get('exam.mine', {}),
-    settings: S.settings,
-  };
+// 要同步的內容（雲端 v2）：題庫清單 meta、每個題庫的作答紀錄／錯題／每日進度／複習排程／自己編的記憶法／別名、
+// 自訂題庫的 Excel 內容（src）、共用設定。進行到一半的作答與這一組題目不同步。
+//   { v:2, t, banks:[meta], data:{ [id]:{ seen, daily, stats, wrong, wrongT, mine, alias, src?, srcT } }, settings }
+// src：題庫內容；null 表示用內建題庫（只有 main 會是 null）；srcT：src 最後更動的時間，合併時取較新的
+const BANK_DATA = ['seen', 'daily', 'stats', 'wrong', 'wrongT', 'mine', 'alias'];
+const dflt = n => n === 'wrong' ? [] : {};
+const stripPerBank = st => { const o = Object.assign({}, st); PER_BANK_SETTINGS.forEach(k => delete o[k]); return o; };
+
+function collectBank(m, withSrc = true) {
+  const d = {};
+  for (const n of BANK_DATA) d[n] = store.get(keyOf(m.id, n), dflt(n));
+  d.srcT = m.srcT || 0;
+  if (withSrc) {
+    const src = store.get(keyOf(m.id, 'bank'), null);
+    if (src || m.id === MAIN_ID) d.src = src;   // main 沒有自訂題庫時存 null（＝內建）
+  }
+  return d;
 }
 
-// 兩台裝置的紀錄合併：做過的題數、每日題數取較大；每題的複習狀態取作答次數較多（一樣多取較新）的；
-// 錯題本看每題最後一次是「加入」還是「移出」；設定取較新的那份
-function mergeState(a, b) {
+function collectState(withSrc = true) {
+  const data = {};
+  for (const m of BANKS) if (!m.del) data[m.id] = collectBank(m, withSrc);
+  return { v: 2, t: Date.now(), banks: BANKS.map(b => Object.assign({}, b)), data, settings: sharedSettings() };
+}
+
+// 雲端若是舊格式（v1：只有一個題庫），升級成 v2：整份資料當作 main 題庫
+function normalizeState(x) {
+  if (!x) return null;
+  if (x.banks && x.data) return x;
+  const d = {};
+  for (const n of BANK_DATA) d[n] = x[n] !== undefined ? x[n] : dflt(n);
+  d.srcT = 0; d.src = null;
+  return { v: 2, t: x.t || 0, banks: [legacyMainMeta(x.settings, !!(x.settings && (x.settings.examDate || x.settings.dailySets)))], data: { [MAIN_ID]: d }, settings: x.settings ? stripPerBank(x.settings) : null };
+}
+
+// 同一個題庫在兩台裝置上的紀錄合併：做過的題數、每日題數取較大；每題的複習狀態取作答次數較多（一樣多取較新）的；
+// 錯題本看每題最後一次是「加入」還是「移出」；記憶法取較新的；題庫內容（src）取 srcT 較新的
+function mergeBank(a, b) {
   a = a || {}; b = b || {};
   const keys = (x, y) => new Set([...Object.keys(x || {}), ...Object.keys(y || {})]);
-  const out = { v: 1, t: Date.now(), seen: {}, daily: {}, stats: {}, wrongT: {} };
+  const out = { seen: {}, daily: {}, stats: {}, wrongT: {}, mine: {}, alias: Object.assign({}, b.alias, a.alias) };
   for (const k of keys(a.seen, b.seen)) out.seen[k] = Math.max((a.seen || {})[k] || 0, (b.seen || {})[k] || 0);
   for (const k of keys(a.daily, b.daily)) out.daily[k] = Math.max((a.daily || {})[k] || 0, (b.daily || {})[k] || 0);
   for (const k of keys(a.stats, b.stats)) {
@@ -1514,7 +1718,6 @@ function mergeState(a, b) {
     const x = (a.wrongT || {})[k], y = (b.wrongT || {})[k];
     out.wrongT[k] = !x ? y : !y ? x : (x.t >= y.t ? x : y);
   }
-  out.mine = {};
   for (const k of keys(a.mine, b.mine)) {
     const x = (a.mine || {})[k], y = (b.mine || {})[k];
     out.mine[k] = !x ? y : !y ? x : (x.t >= y.t ? x : y);
@@ -1522,19 +1725,90 @@ function mergeState(a, b) {
   const wrong = new Set([...(a.wrong || []), ...(b.wrong || [])]);
   for (const [k, v] of Object.entries(out.wrongT)) v.in ? wrong.add(k) : wrong.delete(k);
   out.wrong = [...wrong];
-  const sa = a.settings, sb = b.settings;
-  out.settings = !sa ? sb : !sb ? sa : ((sa._t || 0) >= (sb._t || 0) ? sa : sb);
+  const aT = a.srcT || 0, bT = b.srcT || 0;
+  const pick = bT > aT ? b : aT > bT ? a : (a.src ? a : b.src ? b : a), other = pick === a ? b : a;
+  out.srcT = Math.max(aT, bT);
+  const src = pick.src !== undefined ? pick.src : other.src;
+  if (src !== undefined) out.src = src;
   return out;
 }
 
+// 兩台裝置（或本機與雲端）的整份狀態合併：題庫 meta 取 t 較新的（刪除用墓碑 del，墓碑較新就刪）；
+// 沒被刪除的題庫逐個 mergeBank；共用設定取較新的那份
+function mergeState(a, b) {
+  a = normalizeState(a) || { banks: [], data: {}, settings: null };
+  b = normalizeState(b) || { banks: [], data: {}, settings: null };
+  const ids = [...new Set([...a.banks.map(x => x.id), ...b.banks.map(x => x.id)])];
+  const banks = [], data = {};
+  for (const id of ids) {
+    const x = a.banks.find(m => m.id === id), y = b.banks.find(m => m.id === id);
+    const meta = Object.assign({}, !x ? y : !y ? x : ((y.t || 0) > (x.t || 0) ? y : x));
+    if (!meta.del) {
+      const d = mergeBank(a.data[id], b.data[id]);
+      meta.srcT = d.srcT;
+      data[id] = d;
+    }
+    banks.push(meta);
+  }
+  const sa = a.settings, sb = b.settings;
+  return { v: 2, t: Date.now(), banks: ensureBanks(banks), data, settings: !sa ? sb : !sb ? sa : ((sa._t || 0) >= (sb._t || 0) ? sa : sb) };
+}
+
+// 把合併後的狀態寫回這台裝置：建立／更新／刪除題庫、寫入各鍵；回傳 true 表示目前題庫被換掉了（要回首頁）
 function applyState(s) {
-  store.set('exam.seen', s.seen || {});
-  store.set('exam.daily', s.daily || {});
-  store.set('exam.stats', s.stats || {});
-  store.set('exam.wrong', s.wrong || []);
-  store.set('exam.wrongT', s.wrongT || {});
-  store.set('exam.mine', s.mine || {});
-  if (s.settings) { Object.assign(S.settings, s.settings); store.set('exam.settings', S.settings); }
+  const prev = new Map(BANKS.map(b => [b.id, b]));
+  const keep = [];
+  let reload = false, failed = [];
+  for (const m of s.banks) {
+    if (m.del) { BANK_NAMES.forEach(n => store.del(keyOf(m.id, n))); keep.push(m); continue; }
+    const d = s.data[m.id];
+    if (d) {
+      for (const n of BANK_DATA) store.set(keyOf(m.id, n), d[n] !== undefined ? d[n] : dflt(n));
+      const key = keyOf(m.id, 'bank'), p = prev.get(m.id), had = store.has(key);
+      const changed = !p || p.del || (p.srcT || 0) !== (m.srcT || 0);
+      if (d.src) {
+        if (changed || !had) {
+          if (store.set(key, d.src)) { if (m.id === ACTIVE) reload = true; }
+          else if (!had) { store.del(key); failed.push(m.name); continue; }   // 手機空間不足、這個題庫存不進來：先不放進清單（雲端那份還在，下次同步再試）
+        }
+      } else if (d.src === null && m.id === MAIN_ID && had && changed) { store.del(key); if (ACTIVE === MAIN_ID) reload = true; }
+    }
+    keep.push(m);
+  }
+  BANKS = ensureBanks(keep);
+  saveBanks();
+  if (s.settings) { Object.assign(S.settings, stripPerBank(s.settings)); store.set('exam.settings', sharedSettings()); }
+  const cur = activeMeta();
+  if (!cur || cur.del || reload) { reload = true; pickActiveBank(); }   // 目前題庫被刪、不見或內容被換掉：重新載入（找不到就換到第一個）
+  else { applyMetaToSettings(cur); if (S.session && !S.session.ids.every(id => Q[id])) S.session = null; }
+  if (failed.length) toast(`手機空間不足，題庫「${failed.join('、')}」沒有存進這台裝置`, 6000);
+  return reload;
+}
+
+// 雲端文件（Firestore 的 users/{uid}，只能用這一個文件）：整份 JSON 用 deflate 壓縮後轉 base64 放在 z 欄位；
+// 沒有 CompressionStream 的瀏覽器退回舊的 data 字串。Firestore 單一文件上限 1 MiB，超過約 900KB 就明確報錯
+const MAX_DOC = 900000;
+const b64FromBytes = u8 => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
+const bytesFromB64 = b => Uint8Array.from(atob(b), c => c.charCodeAt(0));
+const pipeBytes = async (u8, stream) => new Uint8Array(await new Response(new Blob([u8]).stream().pipeThrough(stream)).arrayBuffer());
+
+async function packState(state) {
+  const json = JSON.stringify(state);
+  let doc, size;
+  if (typeof CompressionStream === 'function') {
+    doc = { z: b64FromBytes(await pipeBytes(new TextEncoder().encode(json), new CompressionStream('deflate'))) };
+    size = doc.z.length;
+  } else { doc = { data: json }; size = new TextEncoder().encode(json).length; }
+  if (size > MAX_DOC) throw Object.assign(new Error(`題庫與紀錄太大（約 ${Math.round(size / 1024)} KB，雲端上限約 900 KB），無法同步。請刪掉不用的題庫`), { code: 'too-large' });
+  return doc;
+}
+
+async function unpackState(d) {
+  if (d.z) {
+    if (typeof DecompressionStream !== 'function') throw new Error('這個瀏覽器不支援讀取雲端資料，請改用較新的瀏覽器');
+    return JSON.parse(new TextDecoder().decode(await pipeBytes(bytesFromB64(d.z), new DecompressionStream('deflate'))));
+  }
+  return JSON.parse(d.data);   // 舊格式（v1）或沒壓縮的 v2
 }
 
 function loadScript(src) {
@@ -1576,8 +1850,16 @@ async function syncLogin() {
   }
 }
 
-// 這台裝置上屬於「帳號」的紀錄（題庫本身不算，登出時不會動）
-const ACCT_KEYS = ['exam.seen', 'exam.daily', 'exam.stats', 'exam.wrong', 'exam.wrongT', 'exam.mine', 'exam.settings', 'exam.session', 'exam.set', 'exam.syncLast'];
+// 清掉這台裝置上屬於「帳號」的所有資料：每個題庫的紀錄與題庫內容（exam.b.*、main 的舊鍵）、題庫清單、目前題庫、設定、同步記號。
+// 不動的：安裝提示的偏好、換帳號備份（exam.backup.*）
+const ACCT_KEYS = ['exam.settings', 'exam.syncLast', 'exam.owner', 'exam.banks', 'exam.active'].concat(BANK_NAMES.map(n => 'exam.' + n));
+function clearAccountData() {
+  const keys = [];
+  try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k && k.startsWith('exam.b.')) keys.push(k); } } catch (e) {}
+  keys.concat(ACCT_KEYS).forEach(k => store.del(k));
+  BANKS = [];
+  ACTIVE = MAIN_ID;
+}
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // 登出：先把紀錄上傳，再清掉這台裝置上的紀錄（紀錄在 Google 帳號裡，下次登入會回來）。
@@ -1587,12 +1869,11 @@ async function syncLogout() {
   while (SYNC.busy) await sleep(200);
   const ok = await syncNow(true);
   const msg = ok
-    ? '登出後，這台裝置上的練習紀錄會清掉（已經存在你的 Google 帳號裡，下次登入就會回來）。確定要登出嗎？'
-    : '現在無法同步（可能沒有網路），登出會清掉這台裝置上的紀錄，還沒上傳的修改會遺失。確定要登出嗎？';
+    ? '登出後，這台裝置上的所有題庫與練習紀錄會清掉（已經存在你的 Google 帳號裡，下次登入就會回來）。確定要登出嗎？'
+    : '現在無法同步（可能沒有網路），登出會清掉這台裝置上的所有題庫與紀錄，還沒上傳的修改會遺失。確定要登出嗎？';
   if (!confirm(msg)) return;
   await SYNC.auth.signOut();
-  ACCT_KEYS.forEach(k => store.del(k));
-  store.del('exam.owner');
+  clearAccountData();
   SYNC.reload();
 }
 SYNC.reload = () => location.reload();
@@ -1605,29 +1886,32 @@ async function syncNow(silent) {
     const uid = SYNC.user.uid;
     const ref = SYNC.db.collection('users').doc(uid);
     const snap = await ref.get();
-    const remote = snap.exists ? JSON.parse(snap.data().data) : null;
+    const remote = snap.exists ? await unpackState(snap.data()) : null;
     const owner = store.get('exam.owner', null);
     let merged;
     if (owner && owner !== uid) {
-      // 這台裝置上留著另一個帳號的紀錄：先備份起來，不合併進這個帳號，改用這個帳號雲端的紀錄
-      store.set('exam.backup.' + owner, collectState());
-      merged = remote || { v: 1, t: Date.now(), seen: {}, daily: {}, stats: {}, wrong: [], wrongT: {}, mine: {}, settings: null };
-      ['exam.settings', 'exam.session', 'exam.set'].forEach(k => store.del(k));
+      // 這台裝置上留著另一個帳號的紀錄：先備份起來（不含題庫內容），不合併進這個帳號，改用這個帳號雲端的紀錄
+      store.set('exam.backup.' + owner, collectState(false));
+      clearAccountData();
+      S.session = null;
+      merged = mergeState(null, remote);
       reload = true;
     } else {
       merged = mergeState(collectState(), remote);   // 沒登入時做的紀錄、或同一個帳號：合併
     }
-    applyState(merged);
+    const switched = applyState(merged);
     store.set('exam.owner', uid);
-    await ref.set({ data: JSON.stringify(merged), updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+    await ref.set(Object.assign(await packState(merged), { updatedAt: firebase.firestore.FieldValue.serverTimestamp() }));
     SYNC.last = Date.now(); store.set('exam.syncLast', SYNC.last); SYNC.msg = '';
     ok = true;
     if (!silent) toast('已同步');
     if (reload) { SYNC.busy = false; SYNC.reload(); return true; }
-    if (S.screen === 'home') go('home', true);
+    if (switched && S.screen !== 'home') go('home');
+    else if (S.screen === 'home') go('home', true);
   } catch (e) {
-    SYNC.msg = '同步失敗：' + (e.code || e.message);
-    if (!silent) toast(SYNC.msg + '\n（如果是權限問題，請確認 Firestore 規則已發布）', 6000);
+    SYNC.msg = e.code === 'too-large' ? e.message : '同步失敗：' + (e.code || e.message);
+    if (e.code === 'too-large') { if (!SYNC.warnedBig) { SYNC.warnedBig = true; toast(SYNC.msg, 8000); } }
+    else if (!silent) toast(SYNC.msg + '\n（如果是權限問題，請確認 Firestore 規則已發布）', 6000);
   }
   SYNC.busy = false;
   paintSync();
@@ -1693,15 +1977,13 @@ if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
  * 啟動
  * ============================================================ */
 (function init() {
-  const bank = loadBank();
-  if (!bank) {
+  initBanks();            // 舊使用者沒有 exam.banks：現有資料視為 main 題庫
+  if (!pickActiveBank()) {   // 目前題庫讀不出來會退回 main／第一個讀得出來的題庫；全部都不行才走到這裡
     $app.append(h('h1', {}, '題庫練習'), h('div', { class: 'card' }, h('p', {}, '還沒有題庫，請先匯入 Excel。'),
-      h('button', { class: 'btn pri block', type: 'button', onclick: pickExcel }, '匯入 Excel 題庫')));
+      h('button', { class: 'btn pri block', type: 'button', onclick: pickExcel }, '新開題庫（匯入 Excel）')));
+    syncInit();
     return;
   }
-  setBank(bank);
-  const saved = store.get('exam.session', null);
-  if (saved && saved.ids && saved.ids.every(id => Q[id])) S.session = saved;
   go('home');
   syncInit();
 })();
