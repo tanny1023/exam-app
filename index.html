@@ -1010,7 +1010,7 @@ function viewStudy() {
   const readAll = () => speakItems(set.ids.flatMap((id, i) => {
     const q = Q[id], key = 'k' + i, mn = mnemoOf(q);
     const out = [{ key, text: `第${i + 1}題` }];
-    splitStem(q.stem).forEach(t => out.push({ key, text: forSpeech(t) }));
+    stemSpeechItems(q, () => key).forEach(x => out.push(x));
     answerSpeechItems(q, key).forEach(x => out.push(x));
     if (mn) { out.push({ key, text: '記憶法' }); mn.split(/(?<=[。！？\n])/).filter(t => t.trim()).forEach(t => out.push({ key, text: forSpeech(t) })); }
     return out;
@@ -1181,6 +1181,20 @@ function splitStem(text) {
   return out;
 }
 
+// 朗讀用：把題幹的小片段合併成「一整句」一起念。逗號處不停頓、也不分段，
+// 避免每一小段都重新開口、停頓之後漏字；亮起的是這一句涵蓋的所有片段（keyFor(i)＝第 i 個片段的標記）
+function stemSpeechItems(q, keyFor) {
+  const out = [];
+  let cur = null;
+  splitStem(q.stem).forEach((t, i) => {
+    if (!cur) cur = { keys: [], text: '' };
+    cur.keys.push(keyFor(i)); cur.text += t;
+    if (/[。？！?!\n]\s*$/.test(t) || cur.text.length >= 80) { out.push(cur); cur = null; }
+  });
+  if (cur) out.push(cur);
+  return out.map(x => ({ key: [...new Set(x.keys)].join(' '), text: forSpeech(x.text) }));
+}
+
 function stemNode(q) {
   const marks = S.marks[q.id] || (S.marks[q.id] = new Set());
   return h('p', { class: 'stem' + (S.settings.hl ? ' hlmode' : ''), id: 'stem' },
@@ -1198,10 +1212,10 @@ function stemNode(q) {
 function applyMark(scroll) {
   document.querySelectorAll('.reading').forEach(e => e.classList.remove('reading'));
   if (!(S.speaking || S.paused) || !S.curKey) return;
-  const el = document.querySelector(`[data-sp="${S.curKey}"]`);
-  if (!el) return;
-  el.classList.add('reading');
-  if (scroll) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  const els = String(S.curKey).split(' ').map(k => document.querySelector(`[data-sp="${k}"]`)).filter(Boolean);
+  if (!els.length) return;
+  els.forEach(el => el.classList.add('reading'));
+  if (scroll) els[0].scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
 
 function syncSpeakBtn() {
@@ -1224,7 +1238,7 @@ function stopSpeak() {
 }
 
 // 單句太長（網路語音容易念到一半被截斷）：在逗號處再切開，亮起的段落用同一個 key
-function chunkText(t, max = 50) {
+function chunkText(t, max = 60) {
   t = t.trim();
   if (t.length <= max) return [t];
   const out = [];
@@ -1309,7 +1323,8 @@ function runQueue() {
 function speakItems(items) {
   if (!HAS_TTS || !items.length) return;
   stopSpeak();
-  S.queue = items.flatMap(it => chunkText(it.text).filter(t => t.trim()).map(text => ({ key: it.key, text })));
+  const noPause = t => String(t).replace(/[，、；：,;:]/g, ' ').replace(/\s+/g, ' ');   // 逗號不停頓：停頓之後容易漏字
+  S.queue = items.flatMap(it => chunkText(noPause(it.text)).filter(t => t.trim()).map(text => ({ key: it.key, text })));
   if (!S.queue.length) return;
   S.pos = 0;
   S.speaking = true;
@@ -1457,7 +1472,7 @@ function readQuestion() {
   const s = S.session;
   if (!s) return;
   const q = Q[s.ids[s.idx]], T = TYPES[q.type];
-  speakItems(splitStem(q.stem).map((t, i) => ({ key: 's' + i, text: forSpeech(t) })).concat(T.speech ? T.speech(q, s.perm && s.perm[q.id]) : []));
+  speakItems(stemSpeechItems(q, i => 's' + i).concat(T.speech ? T.speech(q, s.perm && s.perm[q.id]) : []));
 }
 
 function readingTools() {
@@ -1598,7 +1613,7 @@ function viewResult() {
   // 把答錯的題目連同正確答案、記憶法一題一題念過去
   const readWrong = () => speakItems(bad.flatMap((x, i) => {
     const key = 'w_' + x.q.id, out = [{ key, text: `第${i + 1}題` }];
-    splitStem(x.q.stem).forEach(t => out.push({ key, text: forSpeech(t) }));
+    stemSpeechItems(x.q, () => key).forEach(x => out.push(x));
     return out.concat(explainSpeech(x.q, key));
   }));
   drawList();
