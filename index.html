@@ -89,6 +89,12 @@ select{border:1px solid var(--line);background:var(--card);border-radius:10px;pa
 .wrongbox{margin-top:12px;padding:12px;border:2px solid var(--bad);border-radius:12px;background:var(--badbg)}
 .wb-title{font-weight:700;color:var(--bad)}
 .rightbox{border-color:var(--ok);background:var(--okbg)}
+.dmark{background:#fde68a;color:#3b2f00;border-radius:3px;padding:0 2px;font-weight:700}
+.upgrid{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
+.upstat{flex:1 1 56px;text-align:center;padding:8px 4px;border:1px solid var(--line);border-radius:10px}
+.upstat b{display:block;font-size:1.25rem}.upstat span{font-size:.8rem;color:var(--muted)}
+.updet{margin-top:10px}.updet>summary{font-weight:700;padding:6px 0;cursor:pointer}
+.upold,.upnew{font-size:.92rem;margin-top:4px;word-break:break-all}.upold{color:var(--muted)}
 .rightbox .wb-title{color:var(--ok)}
 .wb-ans{font-size:1.12rem;font-weight:700;margin:6px 0;white-space:pre-wrap;word-break:break-word}
 .mn-edit{width:100%;box-sizing:border-box;font:inherit;line-height:1.6;padding:10px;border:2px solid var(--pri);border-radius:10px;background:var(--card);color:inherit;resize:vertical}
@@ -341,7 +347,7 @@ function sheetToQuestions(rows, seen, out, si) {
     let id = hash(rec.unit + '|' + stem);
     if (seen[id] != null) id += '_' + (++seen[id]); else seen[id] = 0;
     const no = parseInt(get(r, c.no), 10);
-    out.push(Object.assign({ id, type: T.id, unit: rec.unit, no: isNaN(no) ? null : no, explain: rec.explain, _si: si, _ri: i }, parsed));
+    out.push(Object.assign({ id, raw: stem, type: T.id, unit: rec.unit, no: isNaN(no) ? null : no, explain: rec.explain, _si: si, _ri: i }, parsed));
   }
   return { skipped, found: true };
 }
@@ -453,7 +459,17 @@ function curSet() {   // 目前這一組的題目；存起來，中途離開再�
 }
 const setNo = () => taskInfo().groupsDone + 1;
 const startExamSet = () => startSession(curSet().ids, 'exam', 'set', true);
-const baseMnemo = q => (window.MNEMO && S.bank.name === (window.BUILTIN || {}).name && q.no != null && MNEMO[q.no]) || '';
+let MNEMO_ID = null;   // 內建記憶法：題目 id → 文字（內建題庫的序號 → id 只算一次）
+function mnemoTable() {
+  if (MNEMO_ID) return MNEMO_ID;
+  MNEMO_ID = {};
+  if (window.BUILTIN && window.MNEMO) {
+    try { for (const q of buildBank(window.BUILTIN).questions) if (q.no != null && MNEMO[q.no]) MNEMO_ID[q.id] = MNEMO[q.no]; } catch (e) {}
+  }
+  return MNEMO_ID;
+}
+// 題庫更新後序號會變，所以用題目本身對應；文字被小幅修改的題目靠 exam.alias（新 id → 舊 id）繼續用原本的記憶法
+const baseMnemo = q => { const t = mnemoTable(); return t[q.id] || t[store.get('exam.alias', {})[q.id]] || ''; };
 const myMnemo = q => store.get('exam.mine', {})[q.id];            // 自己編輯的版本：{ text, t }，text 為 null 表示已還原預設
 const mnemoOf = q => { const m = myMnemo(q); return m && m.text != null ? m.text : baseMnemo(q); };
 function saveMine(q, text) {
@@ -569,10 +585,14 @@ function loadBank() {
 /* ============================================================
  * 匯入 Excel
  * ============================================================ */
-function importBuffer(buf, filename) {
+function readExcel(buf, filename) {
   const wb = XLSX.read(buf, { type: 'array' });
   const sheets = wb.SheetNames.map(n => XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, defval: '', raw: true }));
-  const src = { name: filename.replace(/\.(xlsx|xls|csv)$/i, ''), sheets };
+  return { name: filename.replace(/\.(xlsx|xls|csv)$/i, ''), sheets };
+}
+
+function importBuffer(buf, filename) {
+  const src = readExcel(buf, filename);
   const bank = buildBank(src);        // 失敗會丟例外，不會蓋掉原本的題庫
   const saved = store.set('exam.bank', src);
   setBank(bank);
@@ -600,6 +620,124 @@ function pickExcel() {
     }
   });
   input.click();
+}
+
+/* ---- 更新題庫：選新版 Excel → 列出和現在這份的差異 → 確認後才更換，做題紀錄保留 ---- */
+const bigrams = t => { t = t.replace(/\s+/g, ''); const m = new Set(); for (let i = 0; i < t.length - 1; i++) m.add(t.slice(i, i + 2)); return m; };
+const dice = (a, b) => { if (!a.size || !b.size) return 0; let n = 0; for (const x of a) if (b.has(x)) n++; return 2 * n / (a.size + b.size); };
+
+function diffBanks(oldB, newB) {
+  const oldMap = new Map(oldB.questions.map(q => [q.id, q])), newMap = new Map(newB.questions.map(q => [q.id, q]));
+  let same = 0, renum = 0;
+  const answerChanged = [];
+  for (const n of newB.questions) {
+    const o = oldMap.get(n.id);
+    if (!o) continue;
+    same++;
+    if (o.answer !== n.answer) answerChanged.push({ o, n });
+    if (o.no != null && n.no != null && o.no !== n.no) renum++;
+  }
+  const removed = oldB.questions.filter(q => !newMap.has(q.id)), added = newB.questions.filter(q => !oldMap.has(q.id));
+  // 被刪掉的舊題和新出現的新題，如果文字很像，就視為「同一題被修改」（紀錄與記憶法跟過去）
+  const pairs = [];
+  if (removed.length * added.length <= 250000) {
+    const bo = new Map(removed.map(q => [q.id, bigrams(q.raw)])), bn = new Map(added.map(q => [q.id, bigrams(q.raw)]));
+    const cand = [];
+    for (const o of removed) for (const n of added) {
+      const sc = dice(bo.get(o.id), bn.get(n.id));
+      if (sc >= (o.unit === n.unit ? 0.6 : 0.8)) cand.push({ o, n, sc });
+    }
+    cand.sort((a, b) => b.sc - a.sc);
+    const usedO = new Set(), usedN = new Set();
+    for (const c of cand) if (!usedO.has(c.o.id) && !usedN.has(c.n.id)) { usedO.add(c.o.id); usedN.add(c.n.id); pairs.push(c); }
+  }
+  const pO = new Set(pairs.map(x => x.o.id)), pN = new Set(pairs.map(x => x.n.id));
+  pairs.forEach(x => { if (x.o.answer !== x.n.answer) answerChanged.push({ o: x.o, n: x.n }); });
+  return { same, renum, answerChanged, pairs, removed: removed.filter(q => !pO.has(q.id)), added: added.filter(q => !pN.has(q.id)) };
+}
+
+function prepareUpdate(buf, filename) {
+  const src = readExcel(buf, filename);
+  src.name = S.bank.name;                       // 題庫名稱沿用現在的
+  const bank = buildBank(src);
+  return { src, bank, diff: diffBanks(S.bank, bank), oldInfo: bankInfo(S.bank), newInfo: bankInfo(bank) };
+}
+const bankInfo = b => { const t = b.src && b.src.sheets[0] && b.src.sheets[0][1] && String(b.src.sheets[0][1][0] || ''); return { n: b.questions.length, date: /列印日期[:：]?\s*(\S+)/.test(t || '') ? RegExp.$1 : '' }; };
+
+function applyUpdate(u) {
+  const now = Date.now(), alias = store.get('exam.alias', {});
+  const stats = store.get('exam.stats', {}), seen = store.get('exam.seen', {}), wt = store.get('exam.wrongT', {}), mine = store.get('exam.mine', {});
+  let wrong = store.get('exam.wrong', []);
+  for (const { o, n } of u.diff.pairs) {   // 文字被修改的題目：做題紀錄與自己編的記憶法搬到新題
+    for (const m of [stats, seen, mine]) if (m[o.id] !== undefined) { m[n.id] = m[o.id]; delete m[o.id]; }
+    if (wt[o.id]) { wt[n.id] = Object.assign({}, wt[o.id], { t: now }); wt[o.id] = { in: false, t: now }; }
+    wrong = wrong.map(id => id === o.id ? n.id : id);
+    alias[n.id] = alias[o.id] || o.id;
+  }
+  store.set('exam.stats', stats); store.set('exam.seen', seen); store.set('exam.wrongT', wt); store.set('exam.mine', mine);
+  store.set('exam.wrong', [...new Set(wrong)]); store.set('exam.alias', alias);
+  store.set('exam.bank', u.src);
+  setBank(u.bank);
+  S.settings.units = null;
+  saveSettings();
+  if (S.session && !S.session.ids.every(id => Q[id])) { S.session = null; persistSession(); }
+  store.del('exam.set');
+  syncSoon();
+}
+
+function pickUpdate() {
+  const input = h('input', { type: 'file', accept: '.xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  input.addEventListener('change', async () => {
+    const f = input.files[0];
+    if (!f) return;
+    try { S.update = prepareUpdate(await f.arrayBuffer(), f.name); go('update'); }
+    catch (e) { toast('讀取失敗：' + e.message, 6000); }
+  });
+  input.click();
+}
+
+// 兩段文字的差異：頭尾相同的部分照寫，不同的中段標色
+function diffSpans(a, b) {
+  let p = 0; while (p < a.length && p < b.length && a[p] === b[p]) p++;
+  let e = 0; while (e < a.length - p && e < b.length - p && a[a.length - 1 - e] === b[b.length - 1 - e]) e++;
+  const mid = t => { const m = t.slice(p, t.length - e); return !m ? '（沒有）' : !m.trim() ? '（空白）' : m.length > 60 ? m.slice(0, 60) + '…' : m; };
+  const part = t => [p > 24 ? '…' : '', t.slice(0, p).slice(-24), h('span', { class: 'dmark' }, mid(t)), t.slice(t.length - e, t.length - e + 24), e > 24 ? '…' : ''];
+  return [part(a), part(b)];
+}
+
+function viewUpdate() {
+  const u = S.update;
+  if (!u) return viewHome();
+  const d = u.diff, short = t => t.length > 70 ? t.slice(0, 70) + '…' : t, LIM = 40;
+  const total = d.answerChanged.length + d.pairs.length + d.removed.length + d.added.length;
+  const stat = (n, label) => h('div', { class: 'upstat' }, h('b', {}, String(n)), h('span', {}, label));
+  const list = (title, arr, row, open) => arr.length ? h('details', { class: 'updet', open: !!open },
+    h('summary', {}, `${title}（${arr.length}）`),
+    ...arr.slice(0, LIM).map(row),
+    arr.length > LIM ? h('div', { class: 'hint' }, `還有 ${arr.length - LIM} 題沒列出`) : null) : null;
+  const unit = q => h('div', { class: 'sub' }, q.unit + (q.no ? `　#${q.no}` : ''));
+  return h('div', {},
+    h('div', { class: 'row between' },
+      h('button', { class: 'btn small', type: 'button', onclick: () => { S.update = null; go('home'); } }, '‹ 取消'),
+      h('b', {}, '更新題庫'), h('span', { style: 'width:64px' })),
+    h('div', { class: 'card' },
+      h('div', { class: 'sub' }, `現在：${u.oldInfo.n} 題${u.oldInfo.date ? '（列印日期 ' + u.oldInfo.date + '）' : ''}`),
+      h('div', { class: 'sub' }, `新版：${u.newInfo.n} 題${u.newInfo.date ? '（列印日期 ' + u.newInfo.date + '）' : ''}`),
+      h('div', { class: 'upgrid' },
+        stat(d.same, '沒變'), stat(d.pairs.length, '文字修改'), stat(d.answerChanged.length, '答案改變'), stat(d.removed.length, '被刪除'), stat(d.added.length, '新增')),
+      total === 0 ? h('div', { class: 'fb ok', style: 'margin-top:8px' }, '兩份題庫的題目、答案完全一樣，不需要更新。') : null,
+      d.renum ? h('div', { class: 'hint' }, `另外有 ${d.renum} 題只是序號變了（題目沒變），做題紀錄與記憶法不受影響。`) : null),
+    list('⚠ 答案改變', d.answerChanged, ({ o, n }) => h('div', { class: 'card' }, unit(n), h('p', { class: 'stem', style: 'font-size:.95rem' }, short(n.stem)),
+      h('div', {}, `答案：${o.answer} → `, h('b', { style: 'color:var(--bad)' }, n.answer))), true),
+    list('文字修改', d.pairs, ({ o, n }) => { const [a, b] = diffSpans(o.raw, n.raw); return h('div', { class: 'card' }, unit(n),
+      h('div', { class: 'upold' }, '舊：', ...a), h('div', { class: 'upnew' }, '新：', ...b)); }, true),
+    list('被刪除的題目', d.removed, q => h('div', { class: 'card' }, unit(q), h('p', { class: 'stem', style: 'font-size:.95rem' }, short(q.stem)), h('div', { class: 'sub' }, `答案：${q.answer}`)), true),
+    list('新增的題目', d.added, q => h('div', { class: 'card' }, unit(q), h('p', { class: 'stem', style: 'font-size:.95rem' }, short(q.stem)), h('div', { class: 'sub' }, `答案：${q.answer}`)), true),
+    h('div', { class: 'hint' }, '更新後：沒變的題目，做題紀錄與記憶法照舊；文字修改的題目，紀錄與記憶法會跟著搬過去；被刪除題目的紀錄不再計入進度。新增的題目會排在還沒做的題目裡。'),
+    h('div', { class: 'nav' },
+      h('button', { class: 'btn', type: 'button', onclick: () => { S.update = null; go('home'); } }, '先不要'),
+      h('button', { class: 'btn pri grow', type: 'button', style: 'min-height:52px', disabled: total === 0,
+        onclick: () => { applyUpdate(u); S.update = null; toast(`題庫已更新：共 ${S.bank.questions.length} 題`, 4000); go('home'); } }, '確定更新題庫')));
 }
 
 /* ---- 匯出 Excel：原本的題庫＋多一欄「記憶法」 ---- */
@@ -638,7 +776,7 @@ function go(screen, keepScroll) {
   S.screen = screen;
   if (screen === 'home' || screen === 'result') S.study = null;
   if (screen !== 'quiz' || !keepScroll) stopSpeak();   // 換題或離開作答畫面就停止念題
-  const view = { home: viewHome, study: viewStudy, quiz: viewQuiz, result: viewResult }[screen];
+  const view = { home: viewHome, study: viewStudy, quiz: viewQuiz, result: viewResult, update: viewUpdate }[screen];
   $app.replaceChildren(view());
   if (!keepScroll) window.scrollTo(0, 0);
   if (screen === 'quiz') {
@@ -857,13 +995,14 @@ function viewHome() {
       h('div', { class: 'hint' }, '答錯的題目都在這裡，今天該回頭複習的（隔天、3 天、7 天後再出現）會排在前面；連續答對幾次就會退場。')),
     h('div', { class: 'card' },
       h('h2', {}, '題庫'),
-      h('div', { class: 'row' },
+      h('div', { class: 'row', style: 'flex-wrap:wrap' },
+        h('button', { class: 'btn pri grow', type: 'button', onclick: pickUpdate }, '更新題庫（比對差異）'),
         h('button', { class: 'btn grow', type: 'button', onclick: pickExcel }, '匯入 Excel 題庫'),
         h('button', { class: 'btn grow', type: 'button', onclick: exportExcel }, '匯出 Excel（含記憶法）'),
         window.BUILTIN && store.get('exam.bank', null)
           ? h('button', { class: 'btn', type: 'button', onclick: () => { store.del('exam.bank'); setBank(buildBank(window.BUILTIN)); S.settings.units = null; toast('已還原內建題庫'); go('home'); } }, '還原內建')
           : null),
-      h('div', { class: 'hint' }, 'Excel 需有「題目」「答案」欄；選填「課程名稱」「題型」「解析」。選擇題的選項寫在題目內，格式 (A)…(B)…(C)…(D)…')));
+      h('div', { class: 'hint' }, '工程會公布新版題庫時，按「更新題庫」選新的 Excel：會先列出和現在這份有哪裡不同，確認後才更換，做題紀錄與記憶法都會保留。「匯入」則是直接換成另一份題庫。Excel 需有「題目」「答案」欄；選填「課程名稱」「題型」「解析」。選擇題的選項寫在題目內，格式 (A)…(B)…(C)…(D)…')));
 }
 
 /* ---- 念題目 ＋ 螢光筆 ---- */
@@ -875,7 +1014,7 @@ function splitStem(text) {
   const out = [];
   for (const p of text.split(/(?<=[，、；：？！。;?!\n])|(?<=[,:])(?!\d)|(?<=[^\d][,:])/)) {
     if (!p.trim()) { if (out.length) out[out.length - 1] += p; continue; }
-    if (out.length && out[out.length - 1].replace(/\s/g, '').length < 6) out[out.length - 1] += p;
+    if (out.length && (out[out.length - 1].replace(/\s/g, '').length < 6 || p.replace(/\s/g, '').length < 6)) out[out.length - 1] += p;   // 太短的片段（含單獨的「？」）併回前一句，短句最容易被吃掉開頭
     else out.push(p);
   }
   return out;
@@ -923,32 +1062,75 @@ function stopSpeak() {
   syncSpeakBtn();
 }
 
+// 單句太長（網路語音容易念到一半被截斷）：在逗號處再切開，亮起的段落用同一個 key
+function chunkText(t, max = 50) {
+  t = t.trim();
+  if (t.length <= max) return [t];
+  const out = [];
+  let cur = '';
+  for (const p of t.split(/(?<=[，；、,;。！？])|(?<=\s)/)) {
+    if (cur && (cur + p).length > max) { out.push(cur); cur = p; } else cur += p;
+  }
+  if (cur) out.push(cur);
+  if (out.length > 1 && out[out.length - 1].trim().length < 6) { const last = out.pop(); out[out.length - 1] += last; }
+  return out;
+}
+
 // 一句一句念；每句開始時亮起對應的段落。暫停時記住念到第幾句，繼續就從那一句重念
+// 語音失敗不會默默跳過：先重試 2 次，還是不行才跳過並提示；另有計時保護，句子卡住就強制往下
 function runQueue() {
   const my = ++ttsToken;
+  const alive = () => my === ttsToken;
+  let warned = false;
   const step = () => {
-    if (my !== ttsToken) return;
+    if (!alive()) return;
     if (S.pos >= S.queue.length) { S.speaking = false; S.paused = false; S.curKey = null; S.queue = []; applyMark(false); syncSpeakBtn(); return; }
     S.cur = S.pos;
     const it = S.queue[S.pos++];
     S.curKey = it.key;
     applyMark(true);
-    const u = new SpeechSynthesisUtterance(it.text.trim());
+    say(it, 0);
+  };
+  const say = (it, tries) => {
+    const text = it.text.trim(), u = new SpeechSynthesisUtterance(text);
     u.lang = 'zh-TW';
     u.rate = S.settings.rate;
-    const v = speechSynthesis.getVoices().find(x => /zh[-_]TW/i.test(x.lang)) || speechSynthesis.getVoices().find(x => /^zh/i.test(x.lang));
+    const vs = speechSynthesis.getVoices();
+    const v = vs.find(x => /zh[-_]TW/i.test(x.lang)) || vs.find(x => /^zh/i.test(x.lang));
     if (v) u.voice = v;
-    u.onend = step;
-    u.onerror = step;
+    window.__ttsU = u;   // 留一份參照，避免念到一半被瀏覽器回收、結束事件不會觸發
+    let done = false, timer = 0;
+    const dur = Math.round(text.length / (2 * S.settings.rate) * 1000) + 4000;   // 預估念完的時間（寬鬆）
+    const arm = (ms, fn) => { clearTimeout(timer); timer = setTimeout(() => { if (!done && alive()) fn(); }, ms); };
+    const finish = next => { if (done) return; done = true; clearTimeout(timer); if (alive()) next(); };
+    const cancelNow = () => { try { speechSynthesis.cancel(); } catch (e) {} };
+    const retryOrSkip = why => {
+      done = true; clearTimeout(timer);
+      if (!alive()) return;
+      if (tries < 2) { cancelNow(); setTimeout(() => { if (alive()) say(it, tries + 1); }, 300); return; }
+      console.warn('朗讀失敗，已跳過：', why, text);
+      if (!warned) { warned = true; toast('有一句語音沒念出來，已跳過', 3000); }
+      step();
+    };
+    u.onstart = () => arm(dur, () => { cancelNow(); finish(() => setTimeout(step, 200)); });   // 開始了卻一直不結束：強制往下一句
+    u.onend = () => finish(step);
+    u.onerror = e => {
+      if (done || !alive()) return;
+      const err = e && e.error;
+      if (err === 'interrupted' || err === 'canceled') return finish(step);
+      retryOrSkip(err || '未知錯誤');
+    };
+    arm(Math.max(8000, dur), () => retryOrSkip('沒有開始念'));   // 一直沒開始念：重試
     speechSynthesis.speak(u);
   };
-  setTimeout(step, 60);   // cancel() 後稍等一下再念，避免被吃掉
+  setTimeout(step, 200);   // cancel() 後要多等一下再念，太快會把開頭幾個字吃掉
 }
 
 function speakItems(items) {
   if (!HAS_TTS || !items.length) return;
   stopSpeak();
-  S.queue = items;
+  S.queue = items.flatMap(it => chunkText(it.text).filter(t => t.trim()).map(text => ({ key: it.key, text })));
+  if (!S.queue.length) return;
   S.pos = 0;
   S.speaking = true;
   syncSpeakBtn();
@@ -975,18 +1157,41 @@ function resumeSpeak() {
 
 const togglePause = () => S.paused ? resumeSpeak() : pauseSpeak();
 
-// 把符號和單位換成念得出來的字
+// 把符號和單位換成念得出來的字（只影響朗讀，畫面上的文字不變）
+const SPEECH_RULES = [
+  [/_{2,}/g, '空格'],
+  [/(\d+(?:\.\d+)?)\s*%/g, '百分之$1'], [/%/g, '百分比'],
+  // 單位
+  [/(?:kgf|公斤f)\s*\/\s*cm2/g, '公斤力每平方公分'], [/(?:kgf|公斤f)\s*\/\s*mm2/g, '公斤力每平方公釐'], [/(?:kgf|公斤f)\s*\/\s*(?=平方)/g, '公斤力每'],
+  [/kg\s*\/\s*cm2/g, '公斤每平方公分'], [/kgf|公斤f/g, '公斤力'], [/N\s*\/\s*mm2/g, '牛頓每平方公釐'],
+  [/MPa/g, '兆帕'], [/kPa/g, '千帕'], [/MΩ/g, '兆歐姆'], [/Ω/g, '歐姆'],
+  [/(\d)\s*[mM]3/g, '$1立方公尺'], [/(\d)\s*[mM]2/g, '$1平方公尺'], [/cm2/g, '平方公分'], [/mm2/g, '平方公釐'], [/(?<![a-zA-Z])m2/g, '平方公尺'], [/(?<![a-zA-Z])m3/g, '立方公尺'],
+  [/(\d)\s*mm(?![a-zA-Z])/g, '$1公釐'], [/(\d)\s*cm(?![a-zA-Z])/g, '$1公分'], [/(\d)\s*kg(?![a-zA-Z])/g, '$1公斤'], [/(\d)\s*m(?![a-zA-Z])/g, '$1公尺'],
+  [/°\s*C/g, '度'], [/°/g, '度'],
+  // 數字寫法
+  [/(\d+)-(\d+)\s*條/g, '$1之$2條'],
+  [/([A-Za-z])\s*~\s*(?=N\b)/g, '$1服從'],
+  [/(\d)\s*[~–—-]\s*(?=\d)/g, '$1到'], [/-(?=\d)/g, '負'],
+  [/(\d+)\s*\/\s*(\d+)/g, '$2分之$1'], [/(\d+)\s*:\s*(\d+)/g, '$1比$2'],
+  [/(\d),(?=\d{3}(?!\d))/g, '$1'], [/(\d)\.(?=\d)/g, '$1點'],
+  // 符號
+  [/≦|<=/g, '小於等於'], [/≧|>=/g, '大於等於'], [/>/g, '大於'], [/</g, '小於'], [/≒/g, '約等於'], [/≠/g, '不等於'],
+  [/(?<![\d)])\+(?=\d)/g, '正'], [/\+/g, '加'], [/=/g, '等於'], [/[*×]/g, '乘'], [/÷/g, '除以'], [/±/g, '正負'], [/→/g, '，接著，'],
+  [/#\s*(\d+)號?/g, '$1號'], [/#/g, '號'], [/△/g, '得爾塔'],
+  [/μ/g, '繆'], [/σ/g, '西格瑪'], [/ψ/g, '普賽'], [/[Θθ]/g, '西塔'], [/φ/g, '斐'], [/ω/g, '歐米加'], [/α/g, '阿爾法'], [/β/g, '貝塔'], [/[δΔ]/g, '得爾塔'], [/τ/g, '套'],
+  [/CO2/g, '二氧化碳'], [/NO2/g, '二氧化氮'], [/SO2/g, '二氧化硫'],
+  [/(?<![A-Za-z])[A-Z]{2,}(?![a-z])/g, m => m.split('').join(' ')],   // 英文縮寫逐字母念：CNS → C N S
+  // 標點、括號、引號
+  [/[(（]([^()（）]{1,2})[)）]/g, '$1'],
+  [/[-–—~\[\]{}()（）【】「」『』《》〈〉〝〞"“”]/g, '，'], [/['’‘`]/g, ''], [/\//g, '、'],
+  [/\s+/g, ' '], [/(，\s*){2,}/g, '，'],
+];
 function forSpeech(s) {
-  return String(s == null ? '' : s)
-    .replace(/(\d+(?:\.\d+)?)\s*[%％]/g, '百分之$1')
-    .replace(/kg\/cm²|kg\/㎠|㎏\/㎠/g, '公斤每平方公分')
-    .replace(/cm²|㎠/g, '平方公分').replace(/m²|㎡/g, '平方公尺').replace(/m³|㎥/g, '立方公尺')
-    .replace(/㎝/g, '公分').replace(/㎜/g, '公釐').replace(/㎏/g, '公斤')
-    .replace(/(\d)\s*mm(?![a-zA-Z])/g, '$1公釐').replace(/(\d)\s*cm(?![a-zA-Z])/g, '$1公分').replace(/(\d)\s*m(?![a-zA-Z])/g, '$1公尺')
-    .replace(/℃/g, '度').replace(/≦/g, '小於等於').replace(/≧/g, '大於等於').replace(/＞/g, '大於').replace(/＜/g, '小於')
-    .replace(/[(（]([^()（）]{1,2})[)）]/g, '$1')
-    .replace(/[()（）【】「」『』“”]/g, '，')
-    .replace(/\s+/g, ' ');
+  // 全形英數與符號轉半形；㎠、₂、異體字轉成一般寫法。中文標點（，；：？！）先換成暫代字元，免得被轉成半形
+  const keep = '，；：？！';
+  let t = String(s == null ? '' : s).replace(/[，；：？！]/g, c => String.fromCharCode(0xE000 + keep.indexOf(c))).normalize('NFKC').replace(/[-]/g, c => keep[c.charCodeAt(0) - 0xE000]);
+  for (const [re, to] of SPEECH_RULES) t = t.replace(re, to);
+  return t;
 }
 
 // 題目文字裡「1.xxx 2.xxx 3.xxx」這種編號項目，抓出來讓數字組合的答案可以逐項念
