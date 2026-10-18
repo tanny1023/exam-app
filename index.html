@@ -1342,7 +1342,7 @@ function cheatBtn(q) {
   return h('button', { class: 'btn small', type: 'button', onclick: () => {
     stopSpeak();
     const topic = hits[0].topic;
-    S.cheat = topic; S.cheatFocus = hits.filter(x => x.topic === topic).map(x => x.key); S.cheatFrom = S.screen;
+    S.cheatHits = hits; S.cheat = topic; S.cheatFocus = hits.filter(x => x.topic === topic).map(x => x.key); S.cheatFrom = S.screen; S.cheatAll = false;
     go('cheat');
   } }, '📋 速查表');
 }
@@ -1352,46 +1352,53 @@ function cheatCard() {
   if (!list.length) return null;
   return h('div', { class: 'card' },
     h('h2', {}, '速查表'),
-    h('div', { class: 'row', style: 'flex-wrap:wrap' }, list.map(t => h('button', { class: 'btn grow', type: 'button', onclick: () => { S.cheat = t.id; S.cheatFocus = null; S.cheatFrom = 'home'; go('cheat'); } }, t.title))));
+    h('div', { class: 'row', style: 'flex-wrap:wrap' }, list.map(t => h('button', { class: 'btn grow', type: 'button', onclick: () => { S.cheat = t.id; S.cheatFocus = null; S.cheatAll = false; S.cheatFrom = 'home'; go('cheat'); } }, t.title))));
 }
 
 function viewCheat() {
   const t = (window.CHEAT || []).find(x => x.id === S.cheat);
   if (!t) return viewHome();
   const focus = new Set(S.cheatFocus || []), back = S.cheatFrom || 'home';
+  const only = focus.size > 0 && !S.cheatAll;   // 從題目按進來：只列這一題相關的，不用全部看
   const queue = [];   // 念的順序：每一列（或每一條）一句，亮起那一列
   let n = 0;
   const secs = t.sections.map(sec => {
     const body = sec.rows
       ? sec.rows.map(r => {
           const key = 'c' + (n++), q = r[r.length - 1], cols = r.slice(0, -1);
+          if (only && !focus.has(key)) return null;
           queue.push({ key, text: forSpeech(sec.say ? sec.say(cols) : cols.filter(Boolean).join('，')) });
-          return h('div', { class: 'chrow' + (focus.has(key) ? ' focus' : ''), 'data-sp': key },
+          return h('div', { class: 'chrow' + (focus.has(key) && !only ? ' focus' : ''), 'data-sp': key },
             h('div', { class: 'ch1' }, cols[0]),
             ...cols.slice(1).map((c, i) => c ? h('div', { class: 'ch2' }, (sec.head && sec.head[i + 1] ? sec.head[i + 1] + '：' : '') + c) : null),
             h('div', { class: 'chq' }, '題號 ' + q));
         })
       : sec.items.map(([text, q]) => {
           const key = 'c' + (n++);
+          if (only && !focus.has(key)) return null;
           queue.push({ key, text: forSpeech(text) });
-          return h('div', { class: 'chrow' + (focus.has(key) ? ' focus' : ''), 'data-sp': key }, h('div', {}, text), h('div', { class: 'chq' }, '題號 ' + q));
+          return h('div', { class: 'chrow' + (focus.has(key) && !only ? ' focus' : ''), 'data-sp': key }, h('div', {}, text), h('div', { class: 'chq' }, '題號 ' + q));
         });
-    if (sec.h) queue.splice(queue.length - body.length, 0, { key: null, text: sec.h });
-    return h('div', { class: 'card' }, h('h2', {}, sec.h), body, sec.tip ? h('div', { class: 'chtip' }, sec.tip) : null);
-  });
+    const shown = body.filter(Boolean);
+    if (!shown.length) return null;   // 這個小標題底下沒有相關的就整段不列
+    if (sec.h) queue.splice(queue.length - shown.length, 0, { key: null, text: sec.h });
+    return h('div', { class: 'card' }, h('h2', {}, sec.h), shown, sec.tip && !only ? h('div', { class: 'chtip' }, sec.tip) : null);
+  }).filter(Boolean);
   const readAll = () => speakItems(queue.slice());
-  if (focus.size) setTimeout(() => { const el = document.querySelector('.chrow.focus'); if (el) el.scrollIntoView({ block: 'center' }); }, 60);
+  if (focus.size && !only) setTimeout(() => { const el = document.querySelector('.chrow.focus'); if (el) el.scrollIntoView({ block: 'center' }); }, 60);
   return h('div', {},
     h('div', { class: 'row between' },
-      h('button', { class: 'btn small', type: 'button', onclick: () => { stopSpeak(); S.cheatFocus = null; go(back, back !== 'home'); } }, '‹ 返回'),
-      h('b', {}, t.title),
+      h('button', { class: 'btn small', type: 'button', onclick: () => { stopSpeak(); S.cheatFocus = null; S.cheatAll = false; go(back, back !== 'home'); } }, '‹ 返回'),
+      h('b', {}, only ? '這題相關' : t.title),
       HAS_TTS ? h('button', { class: 'btn small', type: 'button', id: 'speakBtn', 'data-idle': '🔊 念給我聽', onclick: () => (S.speaking || S.paused) ? stopSpeak() : readAll() }, '🔊 念給我聽') : h('span', { style: 'width:64px' })),
-    t.intro ? h('div', { class: 'hint', style: 'margin:8px 0 0' }, t.intro) : null,
+    only ? h('div', { class: 'hint', style: 'margin:8px 0 0' }, `只列出跟這一題有關的（${t.title}）。`) : (t.intro ? h('div', { class: 'hint', style: 'margin:8px 0 0' }, t.intro) : null),
     secs,
+    only && S.cheatHits ? [...new Set(S.cheatHits.map(x => x.topic).filter(id => id !== t.id))].map(id => { const o = (window.CHEAT || []).find(x => x.id === id); return o ? h('button', { class: 'btn block', type: 'button', style: 'margin-top:10px', onclick: () => { stopSpeak(); S.cheat = id; S.cheatFocus = S.cheatHits.filter(x => x.topic === id).map(x => x.key); S.cheatAll = false; go('cheat'); } }, `這題在「${o.title}」也有`) : null; }) : null,
+    focus.size ? h('button', { class: 'btn block', type: 'button', style: 'margin-top:10px', onclick: () => { stopSpeak(); S.cheatAll = !S.cheatAll; go('cheat'); } }, only ? '看完整速查表' : '只看這題相關的') : null,
     h('div', { class: 'nav' },
       HAS_TTS ? h('button', { class: 'btn ctl', type: 'button', id: 'pauseBtn', disabled: true, onclick: togglePause }, '⏸ 暫停') : null,
       HAS_TTS ? h('button', { class: 'btn ctl', type: 'button', onclick: readAll }, '↺ 重新開始') : null,
-      h('button', { class: 'btn pri grow', type: 'button', style: 'min-height:52px', onclick: () => { stopSpeak(); S.cheatFocus = null; go(back, back !== 'home'); } }, back === 'home' ? '回首頁' : '回到題目')));
+      h('button', { class: 'btn pri grow', type: 'button', style: 'min-height:52px', onclick: () => { stopSpeak(); S.cheatFocus = null; S.cheatAll = false; go(back, back !== 'home'); } }, back === 'home' ? '回首頁' : '回到題目')));
 }
 
 /* ---- 首頁 ---- */
