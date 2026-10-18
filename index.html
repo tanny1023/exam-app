@@ -1116,6 +1116,7 @@ function viewHome() {
     h('h1', {}, '題庫練習'),
     h('div', { class: 'sub', id: 'bankSub' }, `${bankName()}｜${b.questions.length} 題`),
     bankCard(),
+    bankToolsCard(),
     syncCard(),
     installCard(),
     taskCard(),
@@ -1135,7 +1136,12 @@ function viewHome() {
           } }, '清空'),
           h('button', { class: 'btn pri small', type: 'button', disabled: book.length === 0, onclick: () => startSession(shuffle(book.filter(id => dueSet.has(id))).concat(shuffle(book.filter(id => !dueSet.has(id)))), 'exam', 'wrong') }, '測驗錯題'))),
       h('div', { class: 'hint' }, '答錯的題目都在這裡，今天該回頭複習的（隔天、3 天、7 天後再出現）會排在前面；連續答對幾次就會退場。')),
-    h('div', { class: 'card' },
+  );
+}
+
+// 題庫工具卡片（更新題庫／新開題庫／匯出／還原內建），放在首頁最上面，緊接在題庫切換卡片後面
+function bankToolsCard() {
+  return h('div', { class: 'card' },
       h('h2', {}, '題庫'),
       h('div', { class: 'row', style: 'flex-wrap:wrap' },
         h('button', { class: 'btn pri grow', type: 'button', onclick: pickUpdate }, '更新題庫（比對差異）'),
@@ -1144,7 +1150,7 @@ function viewHome() {
         ACTIVE === MAIN_ID && window.BUILTIN && store.has(K('bank'))
           ? h('button', { class: 'btn', type: 'button', onclick: restoreBuiltin }, '還原內建')
           : null),
-      h('div', { class: 'hint' }, '「更新題庫」只更新目前這個題庫：工程會公布新版題庫時，選新的 Excel，會先列出和現在這份有哪裡不同，確認後才更換，這個題庫的做題紀錄與記憶法都會保留。「新開題庫」會用另一份 Excel 建立一個全新的題庫（進度從零開始、名稱自己取），原本的題庫不受影響，可在首頁最上面切換。Excel 需有「題目」「答案」欄；選填「課程名稱」「題型」「解析」。選擇題的選項寫在題目內，格式 (A)…(B)…(C)…(D)…')));
+      h('div', { class: 'hint' }, '「更新題庫」只更新目前這個題庫：工程會公布新版題庫時，選新的 Excel，會先列出和現在這份有哪裡不同，確認後才更換，這個題庫的做題紀錄與記憶法都會保留。「新開題庫」會用另一份 Excel 建立一個全新的題庫（進度從零開始、名稱自己取），原本的題庫不受影響，可在首頁最上面切換。Excel 需有「題目」「答案」欄；選填「課程名稱」「題型」「解析」。選擇題的選項寫在題目內，格式 (A)…(B)…(C)…(D)…'));
 }
 
 // 題庫切換卡片：下拉選單切換、新開、改名、刪除
