@@ -6706,9 +6706,9 @@ function taskInfo() {
 
 /* ---- 一組 5 題：先預習（看答案＋記憶法）→ 再考同一份 5 題 ---- */
 const SET_SIZE = 5;
-const MIN_PER_SET = 1;   // 一組 5 題（預習＋測驗）約 1 分鐘：每天念 5 組，大約花 5 分鐘
+const minPerSet = () => +S.settings.minPerSet > 0 ? +S.settings.minPerSet : 1;   // 一組 5 題（預習＋測驗）約幾分鐘，預設 1 分鐘（每天念 5 組約 5 分鐘），可以自己調整
 const fmtMin = m => m < 60 ? `${m} 分鐘` : `${Math.floor(m / 60)} 小時${m % 60 ? ' ' + (m % 60) + ' 分鐘' : ''}`;
-const setMin = sets => fmtMin(Math.max(1, Math.round(sets * MIN_PER_SET)));
+const setMin = sets => fmtMin(Math.max(1, Math.round(sets * minPerSet())));
 function pickSet() {
   const seen = store.get(K('seen'), {});
   const ids = S.bank.questions.filter(q => !seen[q.id]).slice(0, SET_SIZE).map(q => q.id);     // 沒做過的，依章節順序
@@ -7161,6 +7161,8 @@ function taskCard() {
   const goalSets = S.settings.dailySets || 20, todaySets = Math.floor((store.get(K('daily'), {})[dateStr()] || 0) / SET_SIZE);   // 每答 5 題算 1 組（新題＋複習都算）
   const goalSel = h('select', { style: dateInput.style.cssText }, [5, 10, 15, 20, 25, 30, 40, 50].map(n => h('option', { value: n, selected: n === goalSets }, `${n} 組（約 ${setMin(n)}）`)));
   goalSel.addEventListener('change', () => { S.settings.dailySets = +goalSel.value; saveSettings(); go('home', true); });
+  const minSel = h('select', { style: dateInput.style.cssText }, [0.5, 1, 1.5, 2, 3, 4, 5, 8, 10].map(n => h('option', { value: n, selected: n === minPerSet() }, `${n} 分鐘`)));
+  minSel.addEventListener('change', () => { S.settings.minPerSet = +minSel.value; saveSettings(); go('home', true); });
   const dayText = t.left > 0 ? `距離考試還有 ${t.left} 天` : t.left === 0 ? '今天考試，加油！' : '考試日期已過';
   return h('div', { class: 'card task' },
     h('div', { class: 'row between' },
@@ -7169,11 +7171,12 @@ function taskCard() {
     h('div', { style: 'margin-top:12px' },
       h('div', { class: 'row between' }, h('span', {}, '整體進度'), h('b', {}, t.unseen === 0 ? '全部都做過一輪了 🎉' : `還剩 ${t.groupsLeft} 組（${t.unseen} 題）還沒做`)),
       h('div', { class: 'bar', style: 'margin:6px 0 0' }, h('i', { style: `width:${pct}%` })),
-      h('div', { class: 'sub' }, `已完成 ${t.groupsDone} / ${t.groupsTotal} 組（每組 ${SET_SIZE} 題，約 ${MIN_PER_SET} 分鐘）；剩下的新題約需 ${setMin(t.groupsLeft)}`)),
+      h('div', { class: 'sub' }, `已完成 ${t.groupsDone} / ${t.groupsTotal} 組（每組 ${SET_SIZE} 題，約 ${minPerSet()} 分鐘）；剩下的新題約需 ${setMin(t.groupsLeft)}`)),
     h('button', { class: 'btn pri block go', type: 'button', style: 'margin-top:12px', onclick: () => inExam ? go('quiz') : go('study') },
       inExam ? `繼續考試（第 ${t.groupsDone + 1} 組）` : t.unseen === 0 ? '再來一組複習' : `開始第 ${t.groupsDone + 1} 組：先看答案`),
     h('div', { class: 'row', style: 'margin-top:10px;flex-wrap:wrap' }, h('span', { class: 'hint', style: 'margin:0' }, '考試日期'), dateInput,
-      h('span', { class: 'hint', style: 'margin:0 0 0 8px' }, '每日目標'), goalSel),
+      h('span', { class: 'hint', style: 'margin:0 0 0 8px' }, '每日目標'), goalSel,
+      h('span', { class: 'hint', style: 'margin:0 0 0 8px' }, '每組約'), minSel),
     planBlock());
 }
 
