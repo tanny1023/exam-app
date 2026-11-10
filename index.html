@@ -6510,26 +6510,29 @@ ${early}`, false);
 }
 const nvHero = () => nvS().hero.trim() || '主角';
 
-function nvTurnPrompt(input) {
+// 依「劇情大綱」（outline 空白＝沒靈感，讓 Gemini 自由發揮）產生 5 個接下來這一段的寫法；avoid＝上一批的標題，重新生成時要避開
+function nvTurnPrompt(outline, avoid) {
   const s = nvS();
-  return `你是一部小說的共同作者，同時是 RPG 的遊戲主持人。使用者扮演主角「${nvHero()}」，你負責其他角色與劇情。
+  return `你是一部小說的共同作者。主角是「${nvHero()}」。請接在前情後面，寫出「接下來這一段」的 5 種不同寫法，讓作者挑一個再自己修改。
 
 【設定集】
-${s.bible.trim() || '（使用者還沒寫設定集，請依前情合理發揮）'}
+${s.bible.trim() || '（作者還沒寫設定集，請依前情合理發揮）'}
 
 ${nvEarlier() ? `【更早的劇情提要】\n${nvEarlier()}\n\n` : ''}【前情（最近的內容，新的段落要緊接在這後面）】
 ${nvContext() || '（故事才剛開始）'}
 
-【主角這一步】
-${input}
+${outline ? `【作者給這一段的劇情大綱／方向】
+${outline}
 
-請嚴格依照設定集裡每個角色的性格，寫出 3 到 5 種「其他角色可能的反應」或「接下來的劇情走向」，彼此要明顯不同（態度、後果或節奏不同）。
+5 個選項都要照這個大綱的方向走，但切入的方式要明顯不同（例如：誰先開口、角色的態度、節奏快慢、帶出的後果、著重對話或著重心理與場景）。大綱沒寫到的細節可以隨機發揮，但不能違反大綱。`
+  : `作者這次沒有靈感，沒有給大綱。請你依前情、設定集與還沒收的伏筆，自由想出 5 種明顯不同的劇情走向（例如：推進主線、角色之間的衝突或靠近、意外事件、揭開一個伏筆、日常喘息），大膽一點、彼此不要相似。`}
+${avoid && avoid.length ? `\n作者不喜歡上一批選項（${avoid.join('、')}），這次請換完全不同的寫法，不要重複。\n` : ''}
 規則：
-1. 不要替主角決定新的台詞或重大行動，主角由使用者扮演。
-2. text 用小說的筆法，繁體中文、台灣用語，80 到 200 字，可以有對話與動作描寫，要能直接接在主角這一步後面。
-3. kind 只能是「角色反應」或「劇情走向」；title 10 個字以內，讓人一眼看出這個選項的方向。
-4. advice 是給作者的建議 1 到 2 句（例如伏筆、節奏、哪個角色快走樣了、下一步可以怎麼演）；沒有值得提的就給空字串。
-只輸出 JSON，格式：{"options":[{"kind":"角色反應","title":"……","text":"……"}],"advice":"……"}`;
+1. 嚴格依照設定集裡每個角色的性格與說話方式，不要讓角色走樣。
+2. text 用小說的筆法，繁體中文、台灣用語，150 到 300 字，可以有對話、動作與心理描寫，人稱與筆調要跟前情一致，要能直接接在前情後面。
+3. options 一定要剛好 5 個；kind 只能是「角色反應」或「劇情走向」；title 10 個字以內，讓人一眼看出這個選項的方向。
+4. advice 是給作者的建議 1 到 2 句（例如伏筆、節奏、哪個角色快走樣了、下一段可以怎麼走）；沒有值得提的就給空字串。
+只輸出 JSON，格式：{"options":[{"kind":"劇情走向","title":"……","text":"……"}],"advice":"……"}`;
 }
 
 /* ---- Google 文件（透過使用者自己部署的 Apps Script） ---- */
@@ -6728,36 +6731,47 @@ function nvTabWrite() {
       h('b', {}, `再答 ${nvToNext()} 題考古題，就能寫下一段。`),
       h('button', { class: 'btn pri block', type: 'button', style: 'margin-top:10px', onclick: () => go('home') }, '回去做題目'));
   } else if (!ui.options) {
-    // 第一步：主角說什麼／做什麼
-    const ta = h('textarea', { class: 'nv-ta', rows: 4, placeholder: '例：我把信收進口袋，看著她說：「這件事妳早就知道了，對吧？」', oninput: e => { ui.input = e.target.value; } }, ui.input);
+    // 第一步：這一段的劇情大綱／方向（也可以不寫，讓 Gemini 隨機生成）
+    const ta = h('textarea', { class: 'nv-ta', rows: 4, placeholder: '寫下這一段想走的方向，Gemini 會照著生成 5 個選項。\n例：兩人在碼頭重逢，她假裝不認識他，但最後留下一張紙條。', oninput: e => { ui.input = e.target.value; } }, ui.input);
     stage = h('div', {},
-      h('div', { class: 'nv-name' }, `▶ ${nvHero()}（你）`),
+      h('div', { class: 'nv-name' }, '▶ 劇情大綱'),
       ta,
+      h('button', { class: 'btn pri block', type: 'button', style: 'margin-top:8px', disabled: busy, onclick: () => nvAsk('outline') }, '🎲 照大綱生成 5 個選項'),
       h('div', { class: 'row', style: 'margin-top:8px' },
-        h('button', { class: 'btn pri grow', type: 'button', disabled: busy, onclick: () => nvAsk() }, '🎲 看看大家的反應'),
-        h('button', { class: 'btn', type: 'button', disabled: busy, onclick: () => {
-          if (!ui.input.trim()) return toast('先寫下這一段的內容');
-          ui.options = []; ui.advice = ''; ui.pick = 0; ui.draft = ui.input.trim(); nvRedraw();
-        } }, '不問 Gemini，直接寫入')));
+        h('button', { class: 'btn grow', type: 'button', disabled: busy, onclick: () => nvAsk('random') }, '🎰 沒靈感，隨機生成'),
+        h('button', { class: 'btn grow', type: 'button', disabled: busy, onclick: () => {
+          ui.options = []; ui.advice = ''; ui.mode = 'self'; ui.pick = -2; ui.draft = ''; nvRedraw();
+        } }, '✏️ 我自己寫')));
   } else {
-    // 第二步：挑一種反應／走向，確認後寫入
-    const draft = ui.pick >= 0 ? h('div', { style: 'margin-top:12px' },
-      h('div', { class: 'nv-name' }, '📜 這一段（可以直接修改）'),
-      h('textarea', { class: 'nv-ta', rows: 8, oninput: e => { ui.draft = e.target.value; } }, ui.draft),
+    // 第二步：挑一個選項（或空白自己寫），在下面的框修改後寫入
+    const picked = ui.pick !== -1;
+    const draft = picked ? h('div', { style: 'margin-top:12px' },
+      h('div', { class: 'nv-name' }, ui.pick === -2 ? '📜 這一段（自己寫）' : '📜 這一段（可以直接修改）'),
+      h('textarea', { class: 'nv-ta', rows: 10, placeholder: '在這裡寫下這一段的內容', oninput: e => { ui.draft = e.target.value; } }, ui.draft),
       h('div', { class: 'row', style: 'margin-top:8px' },
         h('button', { class: 'btn pri grow', type: 'button', disabled: busy, onclick: () => nvCommit() }, '寫入小說（用掉 1 段）'),
         h('button', { class: 'btn', type: 'button', disabled: busy, onclick: () => nvPolish() }, '✨ 請 Gemini 潤稿'))) : null;
+    // 換選項時，如果框裡的內容已經手動改過，先問一下，免得改好的字被蓋掉
+    const choose = (i, text) => {
+      const cur = ui.draft.trim(), orig = ui.pick >= 0 && ui.options[ui.pick] ? ui.options[ui.pick].text : '';
+      if (cur && cur !== orig && ui.pick !== i && !confirm('下面框裡你改過的內容會被換掉，確定要換嗎？')) return;
+      ui.pick = i; ui.draft = text; nvRedraw();
+    };
     stage = h('div', {},
       h('div', { class: 'card', style: 'margin-top:14px' },
-        h('div', { class: 'sub' }, `${nvHero()}：`), h('div', { style: 'white-space:pre-wrap' }, ui.input.trim())),
+        h('div', { class: 'sub' }, ui.mode === 'outline' ? '劇情大綱：' : ui.mode === 'random' ? '沒靈感，隨機生成' : '自己寫這一段'),
+        ui.mode === 'outline' ? h('div', { style: 'white-space:pre-wrap' }, ui.input.trim()) : null),
       ui.advice ? h('div', { class: 'nv-adv' }, '💡 ' + ui.advice) : null,
-      ui.options.length ? h('div', { class: 'hint' }, '挑一種反應或走向：') : null,
-      ui.options.map((o, i) => h('button', { type: 'button', class: 'nv-opt' + (ui.pick === i ? ' sel' : ''), onclick: () => {
-        ui.pick = i; ui.draft = ui.input.trim() + '\n' + o.text; nvRedraw();
-      } }, h('b', {}, `${ui.pick === i ? '▶' : '▷'} ${o.title}`, h('span', { class: 'nv-kind' }, o.kind)), o.text)),
-      h('div', { class: 'row', style: 'margin-top:10px' },
-        h('button', { class: 'btn grow', type: 'button', disabled: busy, onclick: () => nvAsk() }, '🔄 換一批'),
-        h('button', { class: 'btn grow', type: 'button', disabled: busy, onclick: () => { ui.options = null; ui.pick = -1; nvRedraw(); } }, '✏️ 改我的台詞')),
+      ui.options.length ? h('div', { class: 'hint' }, '挑一個，選了之後可以在下面的框自己修改：') : null,
+      ui.options.map((o, i) => h('button', { type: 'button', class: 'nv-opt' + (ui.pick === i ? ' sel' : ''), onclick: () => choose(i, o.text) },
+        h('b', {}, `${ui.pick === i ? '▶' : '▷'} ${i + 1}. ${o.title}`, h('span', { class: 'nv-kind' }, o.kind)), o.text)),
+      h('button', { type: 'button', class: 'nv-opt' + (ui.pick === -2 ? ' sel' : ''), onclick: () => choose(-2, '') },
+        h('b', {}, `${ui.pick === -2 ? '▶' : '▷'} ✏️ 空白，我自己寫`), '不用上面的選項，在下面的框自己輸入這一段。'),
+      ui.mode !== 'self' ? h('button', { type: 'button', class: 'nv-opt', disabled: busy, onclick: () => nvAsk(ui.mode, true) },
+        h('b', {}, '▷ 🔄 以上皆非，重新生成'), ui.mode === 'outline' ? '照同一份大綱，換 5 個不一樣的選項。' : '再隨機換 5 個不一樣的選項。') : null,
+      h('button', { type: 'button', class: 'nv-opt', disabled: busy, onclick: () => nvAsk('random', ui.mode === 'random') },
+        h('b', {}, '▷ 🎰 沒靈感，隨機生成'), '不看大綱，讓 Gemini 依前情自由想 5 個走向。'),
+      h('button', { class: 'btn block', type: 'button', style: 'margin-top:10px', disabled: busy, onclick: () => { ui.options = null; ui.pick = -1; nvRedraw(); } }, '‹ 回去改劇情大綱'),
       draft);
   }
   const unsent = s.story.filter(p => !p.sent).length;
@@ -6774,15 +6788,19 @@ function nvTabWrite() {
       onclick: () => nvRun('送到 Google 文件…', async () => { const k = await nvPush(); toast(`已補送 ${k} 段到 Google 文件`); }) }, `有 ${unsent} 段還沒送到 Google 文件，按這裡補送`) : null);
 }
 
-function nvAsk() {
+// mode：'outline' 照劇情大綱、'random' 沒靈感隨機生成；again＝重新生成（請 Gemini 避開上一批）
+function nvAsk(mode, again) {
   const ui = NV.ui, input = ui.input.trim();
-  if (!input) return toast('先寫下主角說什麼、做什麼');
-  nvRun('Gemini 正在想其他角色的反應…', async () => {
-    const d = nvParseJson(await nvGemini(nvTurnPrompt(input), true));
+  if (mode === 'outline' && !input) return toast('先寫下劇情大綱；沒靈感就按「隨機生成」');
+  const cur = ui.draft.trim(), orig = ui.pick >= 0 && ui.options && ui.options[ui.pick] ? ui.options[ui.pick].text : '';
+  if (cur && cur !== orig && !confirm('下面框裡你改過的內容會被清掉，確定要重新生成嗎？')) return;
+  const avoid = again && ui.options ? ui.options.map(o => o.title) : [];
+  nvRun(mode === 'outline' ? 'Gemini 正在照大綱生成 5 個選項…' : 'Gemini 正在隨機生成 5 個選項…', async () => {
+    const d = nvParseJson(await nvGemini(nvTurnPrompt(mode === 'outline' ? input : '', avoid), true));
     const opts = (Array.isArray(d.options) ? d.options : []).filter(o => o && o.text).slice(0, 5)
-      .map(o => ({ kind: String(o.kind || '角色反應'), title: String(o.title || '').slice(0, 20) || '（未命名）', text: String(o.text).trim() }));
+      .map(o => ({ kind: String(o.kind || '劇情走向'), title: String(o.title || '').slice(0, 20) || '（未命名）', text: String(o.text).trim() }));
     if (!opts.length) throw new Error('Gemini 沒有給出選項，請再按一次');
-    ui.options = opts; ui.advice = String(d.advice || '').trim(); ui.pick = -1; ui.draft = '';
+    ui.options = opts; ui.advice = String(d.advice || '').trim(); ui.mode = mode; ui.pick = -1; ui.draft = '';
   });
 }
 function nvPolish() {
