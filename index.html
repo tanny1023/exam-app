@@ -6506,6 +6506,27 @@ async function nvPush() {   // 把還沒送到 Google 文件的段落依序送�
   }
   return n;
 }
+// 設定集 ↔ Google 文件（另一份「－設定集」文件）。第一行固定寫「主角：名字」，讀回時再拆開
+const NV_OLD_SCRIPT = 'Google 文件那邊的程式還是舊版：請到「連線設定」重新複製程式碼貼上，再「部署 → 管理部署作業 → 編輯 → 版本選新版本 → 部署」';
+async function nvGasNew(payload) {
+  try { return await nvGas(payload); }
+  catch (e) { throw new Error(/不認得的動作/.test(e.message) ? NV_OLD_SCRIPT : e.message); }
+}
+async function nvBiblePush() {
+  const s = nvS();
+  const d = await nvGasNew({ action: 'bible', text: `主角：${s.hero.trim()}\n\n${s.bible.trim()}` });
+  s.bibleUrl = String(d.url || ''); s.bibleDirty = false; nvSave();
+}
+async function nvBiblePull() {
+  const s = nvS();
+  const d = await nvGasNew({ action: 'bibleGet' });
+  let t = String(d.text || '');
+  if (!t.trim()) throw new Error('Google 文件那邊還沒有設定集');
+  const m = t.match(/^主角：(.*)\n/);
+  if (m) { s.hero = m[1].trim(); t = t.slice(m[0].length); }
+  s.bible = t.trim(); s.bibleUrl = String(d.url || ''); s.bibleDirty = false; nvSave();
+}
+
 function nvScript() {
   return `// 小說自動寫入：貼到 Google 文件的「擴充功能 → Apps Script」，再部署成網頁應用程式
 const TOKEN = '${nvS().token}';   // 密語：要跟考古題 APP 裡的一樣（已自動填好，不用改）
@@ -6523,10 +6544,30 @@ function doPost(e) {
       const t = body.getText();
       return out({ ok: true, text: t.slice(-(d.n || 3000)), length: t.length });
     }
+    if (d.action === 'bible') {       // 設定集：整份寫到另一份文件（第一次會自動建立）
+      const doc = bibleDoc(true), b = doc.getBody();
+      b.clear();
+      String(d.text).split('\\n').forEach(function (p) { b.appendParagraph(p); });
+      if (b.getNumChildren() > 1) b.removeChild(b.getChild(0));
+      return out({ ok: true, url: doc.getUrl() });
+    }
+    if (d.action === 'bibleGet') {    // 讀回設定集（換裝置時用）
+      const doc = bibleDoc(false);
+      return out({ ok: true, text: doc ? doc.getBody().getText() : '', url: doc ? doc.getUrl() : '' });
+    }
     return out({ ok: false, error: '不認得的動作' });
   } catch (err) {
     return out({ ok: false, error: String(err) });
   }
+}
+
+function bibleDoc(create) {
+  const props = PropertiesService.getScriptProperties(), id = props.getProperty('BIBLE_ID');
+  if (id) { try { return DocumentApp.openById(id); } catch (err) {} }
+  if (!create) return null;
+  const doc = DocumentApp.create(DocumentApp.getActiveDocument().getName() + '－設定集');
+  props.setProperty('BIBLE_ID', doc.getId());
+  return doc;
 }
 
 function out(o) {
@@ -6705,6 +6746,7 @@ function nvCommit() {
     if (!s.gasUrl) return toast('已存在這台裝置（還沒連 Google 文件）');
     await nvPush();
     toast('✔ 已寫入 Google 文件');
+    if (s.bibleDirty && s.bible.trim()) await nvBiblePush().catch(() => {});   // 設定集有改就順便更新（舊版程式會失敗，不影響小說）
   });
 }
 
@@ -6713,12 +6755,25 @@ function nvTabBible() {
   return h('div', {},
     h('div', { class: 'card' },
       h('h2', {}, '主角（你扮演的角色）'),
-      h('input', { class: 'nv-in', type: 'text', value: s.hero, placeholder: '主角的名字', oninput: e => { s.hero = e.target.value; nvSave(); } })),
+      h('input', { class: 'nv-in', type: 'text', value: s.hero, placeholder: '主角的名字', oninput: e => { s.hero = e.target.value; s.bibleDirty = true; nvSave(); } })),
     h('div', { class: 'card' },
       h('h2', {}, '設定集'),
       h('div', { class: 'sub' }, '世界觀、每個角色的性格、說話方式、彼此的關係、目前的處境。Gemini 會照這裡寫其他角色的反應，寫得越具體越不會走樣。'),
-      h('textarea', { class: 'nv-ta', rows: 14, style: 'margin-top:8px', placeholder: '【世界觀】\n……\n\n【角色】\n・阿澈（主角）：\n・小語：嘴硬心軟，生氣時反而會笑……\n\n【目前劇情】\n……', oninput: e => { s.bible = e.target.value; nvSave(); } }, s.bible),
-      h('div', { class: 'hint' }, '打字就會自動儲存。'),
+      h('textarea', { class: 'nv-ta', rows: 14, style: 'margin-top:8px', placeholder: '【世界觀】\n……\n\n【角色】\n・阿澈（主角）：\n・小語：嘴硬心軟，生氣時反而會笑……\n\n【目前劇情】\n……', oninput: e => { s.bible = e.target.value; s.bibleDirty = true; nvSave(); } }, s.bible),
+      h('div', { class: 'hint' }, '打字就會自動存在這台裝置；按下面的按鈕才會寫到 Google 文件（寫入小說時也會順便更新）。'),
+      h('div', { class: 'row', style: 'margin-top:8px' },
+        h('button', { class: 'btn grow', type: 'button', disabled: busy, onclick: () => {
+          if (!s.bible.trim()) return toast('設定集還是空的');
+          nvRun('把設定集寫到 Google 文件…', async () => { await nvBiblePush(); toast('✔ 設定集已寫到 Google 文件'); });
+        } }, '⬆ 寫到 Google 文件'),
+        h('button', { class: 'btn grow', type: 'button', disabled: busy, onclick: () => {
+          if (s.bible.trim() && !confirm('從 Google 文件讀回設定集，會蓋掉這台裝置上目前的內容，確定嗎？')) return;
+          nvRun('讀取 Google 文件的設定集…', async () => { await nvBiblePull(); toast('✔ 已讀回設定集'); });
+        } }, '⬇ 從 Google 文件讀回')),
+      h('div', { class: 'hint' },
+        !s.gasUrl ? '還沒連上 Google 文件（到「連線設定」分頁）。'
+          : s.bibleUrl ? [s.bibleDirty ? '有修改還沒寫到 Google 文件。' : '✔ 已和 Google 文件一致。', ' ', h('a', { href: s.bibleUrl, target: '_blank', rel: 'noopener' }, '打開設定集文件')]
+          : '第一次按「寫到 Google 文件」時，會在你的雲端硬碟自動建立一份「（小說檔名）－設定集」。'),
       h('button', { class: 'btn pri block', type: 'button', style: 'margin-top:8px', disabled: busy, onclick: () => {
         if (!s.bible.trim()) return toast('先寫一點設定再請 Gemini 看');
         nvRun('Gemini 正在讀設定集…', async () => {
@@ -6771,6 +6826,7 @@ function nvTabConn() {
         h('li', {}, '把編輯器裡原本的內容全部刪掉，貼上下面的程式碼，按儲存（磁片圖示）。'),
         h('li', {}, '右上角「部署」→「新增部署作業」→ 類型選「網頁應用程式」；執行身分選「我」，誰可以存取選「所有人」→「部署」，照畫面完成授權。'),
         h('li', {}, '複製畫面上的「網頁應用程式網址」，貼到下面，按「測試連線」。')),
+      h('div', { class: 'hint' }, '之前已經部署過、現在要換新版程式碼：貼上新程式碼並儲存後，「部署」→「管理部署作業」→ 鉛筆圖示 → 版本選「新版本」→「部署」（網址不會變；會再要求授權一次，因為要建立設定集文件）。'),
       h('div', { class: 'nv-code' }, nvScript()),
       h('button', { class: 'btn block', type: 'button', style: 'margin-top:8px', onclick: () => nvCopy(nvScript(), '已複製程式碼，到 Apps Script 貼上') }, '複製程式碼'),
       h('div', { class: 'hint' }, '程式碼裡的密語是這台裝置自動產生的；網址加密語都對才能寫入，請不要把網址貼給別人。換一台裝置要用同一份文件時，把那台的密語改成一樣：'),
