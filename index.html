@@ -6602,6 +6602,8 @@ function nvStyle() {
 .nv-opt b{display:block;margin-bottom:2px}
 .nv-kind{font-size:.78rem;color:var(--muted);font-weight:400;margin-left:6px}
 .nv-adv{margin-top:10px;padding:10px 12px;border-radius:10px;background:#fff3c4;color:#3b2f00;font-size:.95rem;white-space:pre-wrap}
+.nv-q{margin-top:10px}
+.nv-adv .nv-ta{color:var(--fg);margin-top:4px;display:block}
 .nv-badge{font-weight:700;color:#ea580c}
 .nv-code{font:12px/1.5 ui-monospace,Consolas,monospace;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px;max-height:200px;overflow:auto;white-space:pre}
 .nv-steps{margin:6px 0;padding-left:22px;font-size:.93rem}
@@ -6777,17 +6779,51 @@ function nvTabBible() {
       h('button', { class: 'btn pri block', type: 'button', style: 'margin-top:8px', disabled: busy, onclick: () => {
         if (!s.bible.trim()) return toast('先寫一點設定再請 Gemini 看');
         nvRun('Gemini 正在讀設定集…', async () => {
-          s.bibleNote = await nvGemini(`下面是一部小說的設定集，使用者之後要扮演主角「${nvHero()}」，由你依設定集扮演其他角色。請用繁體中文（台灣用語）、純文字條列回覆，不要用 Markdown 符號：
-一、你理解到的每個角色性格（每人一行，讓作者確認你有沒有讀對）。
-二、設定不夠清楚、演的時候容易走樣的地方，用問句列出來請作者補充（最多 6 點）。
-三、設定之間互相矛盾的地方（沒有就寫「沒有發現」）。
+          const d = nvParseJson(await nvGemini(`下面是一部小說的設定集，使用者之後要扮演主角「${nvHero()}」，由你依設定集扮演其他角色。請用繁體中文（台灣用語）、純文字，不要用 Markdown 符號，整理出：
+roles：你理解到的每個角色性格，每個角色一筆，格式「角色名：性格」，讓作者確認你有沒有讀對。
+questions：設定不夠清楚、演的時候容易走樣的地方，每筆一個問句，請作者補充（最多 8 筆）。設定集裡【補充設定】已經回答過的不要再問。
+conflicts：設定之間互相矛盾的地方，每筆一句話說明哪裡矛盾（沒有就給空陣列）。
+只輸出 JSON，格式：{"roles":["……"],"questions":["……"],"conflicts":["……"]}
 
 【設定集】
-${s.bible.trim()}`, false);
+${s.bible.trim()}`, true));
+          const arr = (v, max) => (Array.isArray(v) ? v : []).map(x => String(x || '').trim()).filter(Boolean).slice(0, max);
+          s.bibleCheck = { roles: arr(d.roles, 60), questions: arr(d.questions, 8).map(q => ({ q, a: '' })), conflicts: arr(d.conflicts, 8).map(q => ({ q, a: '' })) };
+          s.bibleNote = '';
           nvSave();
         });
       } }, '請 Gemini 確認角色性格'),
-      s.bibleNote ? h('div', { class: 'nv-adv' }, s.bibleNote) : null));
+      nvCheckBlock()));
+}
+
+// Gemini 確認設定集的結果：待確認的每一點下面都可以直接回覆，按按鈕就寫進設定集的【補充設定】
+function nvCheckBlock() {
+  const s = nvS(), c = s.bibleCheck, busy = !!NV.ui.busy;
+  if (!c) return s.bibleNote ? h('div', { class: 'nv-adv' }, s.bibleNote,
+    h('div', { style: 'margin-top:8px;font-weight:700' }, '（這是舊版的結果。再按一次上面的按鈕，待確認的地方下面就會出現可以直接回覆的欄位。）')) : null;
+  const item = x => h('div', { class: 'nv-q' }, '・' + x.q,
+    h('textarea', { class: 'nv-ta', rows: 2, placeholder: '在這裡回覆，寫完按最下面的按鈕寫進設定集', oninput: e => { x.a = e.target.value; nvSave(); } }, x.a || ''));
+  const pending = c.questions.concat(c.conflicts);
+  const apply = () => {
+    const done = pending.filter(x => (x.a || '').trim());
+    if (!done.length) return toast('先在問題下面寫回覆');
+    s.bible = s.bible.trim() + (s.bible.includes('【補充設定】') ? '' : '\n\n【補充設定】') + done.map(x => `\n・${x.q}\n　→ ${x.a.trim()}`).join('');
+    c.questions = c.questions.filter(x => !done.includes(x));
+    c.conflicts = c.conflicts.filter(x => !done.includes(x));
+    s.bibleDirty = true;
+    nvSave();
+    if (!s.gasUrl) { toast(`✔ 已把 ${done.length} 點回覆寫進設定集`); return nvRedraw(); }
+    nvRun('把設定集寫到 Google 文件…', async () => { await nvBiblePush(); toast(`✔ 已把 ${done.length} 點回覆寫進設定集，並更新 Google 文件`); });
+  };
+  return h('div', { class: 'nv-adv' },
+    h('b', {}, '一、Gemini 理解到的角色性格'),
+    c.roles.length ? c.roles.map(r => h('div', {}, '・' + r)) : h('div', {}, '（沒有回覆）'),
+    h('b', { style: 'display:block;margin-top:12px' }, '二、設定不夠清楚、容易走樣的地方'),
+    c.questions.length ? c.questions.map(item) : h('div', {}, '都回覆完了，或沒有需要補充的。'),
+    h('b', { style: 'display:block;margin-top:12px' }, '三、互相矛盾的地方'),
+    c.conflicts.length ? c.conflicts.map(item) : h('div', {}, '沒有發現，或都回覆完了。'),
+    pending.length ? h('button', { class: 'btn pri block', type: 'button', style: 'margin-top:12px', disabled: busy, onclick: apply }, '把回覆寫進設定集') : null,
+    pending.length ? h('div', { style: 'margin-top:6px;font-size:.88rem' }, '有寫回覆的會加到設定集最後面的【補充設定】，並從這裡消失；沒寫的會留著。') : null);
 }
 
 function nvTabBook() {
