@@ -6709,11 +6709,11 @@ function viewNovel() {
 
 function nvTabWrite() {
   const s = nvS(), ui = NV.ui, n = nvTickets(), busy = !!ui.busy;
-  const recent = s.story.slice(-2).map(p => p.text);
-  const scene = h('div', { class: 'nv-scene' },
-    recent.length ? recent.map((t, i) => h('div', { class: i < recent.length - 1 ? 'old' : '', style: 'margin-bottom:8px' }, t))
-      : s.docTail ? '……' + s.docTail.slice(-400)
-      : '故事還沒開始。寫下主角的第一步吧。');
+  // 前情＝「我的小說」分頁的劇情提要（有的話）；接續處＝全文（匯入的內容＋之後寫入的段落）的結尾
+  const full = nvFullText(), syn = nvEarlier();
+  const synBox = syn ? h('div', { class: 'nv-scene', style: 'max-height:30vh' }, syn) : null;
+  const scene = h('div', { class: 'nv-scene', style: syn ? 'max-height:30vh' : '' },
+    full ? (full.length > 800 ? '……' : '') + full.slice(-800) : '故事還沒開始。寫下主角的第一步吧。');
   setTimeout(() => { scene.scrollTop = scene.scrollHeight; }, 0);
 
   const warn = [
@@ -6763,7 +6763,10 @@ function nvTabWrite() {
   const unsent = s.story.filter(p => !p.sent).length;
   return h('div', {},
     warn.length ? h('div', { class: 'nv-adv' }, warn.map(w => h('div', {}, '⚠ ' + w))) : null,
-    h('div', { class: 'nv-name', style: 'margin-top:8px' }, '前情'),
+    synBox ? h('div', { class: 'nv-name', style: 'margin-top:8px' }, '前情（劇情提要）') : null,
+    synBox,
+    synBox ? h('div', { class: 'hint', style: 'margin-top:4px' }, '提要在「我的小說」分頁可以修改或重新整理。') : null,
+    h('div', { class: 'nv-name', style: 'margin-top:8px' }, synBox ? '接續處（目前寫到這裡）' : '前情'),
     scene,
     !s.docTail ? h('button', { class: 'btn small', type: 'button', style: 'margin-top:6px', onclick: () => { ui.tab = 'book'; go('novel'); } }, '📥 前面已經寫好了？匯入後讓 Gemini 接著寫') : null,
     stage,
