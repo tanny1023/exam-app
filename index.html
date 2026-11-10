@@ -6385,15 +6385,17 @@ window.FIREBASE_CONFIG = {
 const NV = {
   KEY: 'novel.state',
   PER: 5,                         // 每答幾題解鎖一段
+  CTX: 30000,                     // 每次給 Gemini 看的前情原文字數（更早的用劇情提要）
+  MAX_DOC: 200000,                // 匯入既有內容最多保留幾個字（從結尾算）
   DEFAULT_MODEL: 'gemini-2.5-flash',
   cache: null,
-  ui: { tab: 'write', input: '', options: null, advice: '', pick: -1, draft: '', busy: '', note: '' },
+  ui: { tab: 'write', input: '', options: null, advice: '', pick: -1, draft: '', busy: '', note: '', paste: '' },
 };
 
 function nvS() {
   if (!NV.cache) {
     NV.cache = Object.assign({ answered: 0, used: 0, apiKey: '', model: NV.DEFAULT_MODEL, models: [], gasUrl: '', token: '',
-      hero: '', bible: '', bibleNote: '', story: [], docTail: '', tailAt: 0 }, store.get(NV.KEY, {}));
+      hero: '', bible: '', bibleNote: '', story: [], docTail: '', tailAt: 0, synopsis: '' }, store.get(NV.KEY, {}));
     if (!NV.cache.token) {      // 給 Google 文件那段程式用的密語：自動產生，避免別人拿到網址就能寫你的文件
       const a = new Uint8Array(12); crypto.getRandomValues(a);
       NV.cache.token = Array.from(a, x => x.toString(36).padStart(2, '0')).join('').slice(0, 20);
@@ -6453,11 +6455,41 @@ async function nvListModels() {
   return list;
 }
 
-// 前情：Google 文件的結尾（讀取當下）＋之後在這裡寫入的段落，取最後 3000 字
-function nvContext() {
+// 全文：匯入的既有內容（Google 文件讀取當下，或自己貼上的）＋之後在這裡寫入的段落
+function nvFullText() {
   const s = nvS();
-  const t = [s.docTail].concat(s.story.slice(s.tailAt).map(p => p.text)).filter(Boolean).join('\n');
-  return t.slice(-3000);
+  return [s.docTail].concat(s.story.slice(s.tailAt).map(p => p.text)).filter(Boolean).join('\n');
+}
+// 前情：全文的最後 NV.CTX 字原文照送；更早的部分靠「劇情提要」（nvSynopsis 產生）
+const nvContext = () => nvFullText().slice(-NV.CTX);
+const nvEarlier = () => { const s = nvS(); return s.synopsis && nvFullText().length > NV.CTX ? s.synopsis : ''; };
+
+// 匯入前面已經寫好的內容，之後 Gemini 接著它寫
+async function nvImport(text) {
+  const s = nvS();
+  text = String(text || '').replace(/\r\n?/g, '\n').trim();
+  if (!text) throw new Error('沒有讀到內容');
+  s.docTail = text.slice(-NV.MAX_DOC); s.tailAt = s.story.length; s.synopsis = '';
+  nvSave();
+  if (text.length > NV.CTX && s.apiKey) await nvSynopsis();
+  return text.length;
+}
+// 比較早的劇情（最後 NV.CTX 字之前）請 Gemini 整理成提要，每次出題時一起附上
+async function nvSynopsis() {
+  const s = nvS(), early = nvFullText().slice(0, -NV.CTX);
+  if (!early.trim()) { s.synopsis = ''; nvSave(); return; }
+  s.synopsis = await nvGemini(`下面是一部小說前面的內容。請整理成給接手作者看的「劇情提要」，繁體中文（台灣用語）、純文字、不要用 Markdown 符號，2000 字以內，分三部分：
+一、依時間順序的重要事件。
+二、各角色目前的狀態與彼此的關係。
+三、還沒收的伏筆與未解決的問題。
+只根據內文整理，不要自己加劇情。
+
+【設定集】
+${s.bible.trim() || '（無）'}
+
+【小說內容】
+${early}`, false);
+  nvSave();
 }
 const nvHero = () => nvS().hero.trim() || '主角';
 
@@ -6468,7 +6500,7 @@ function nvTurnPrompt(input) {
 【設定集】
 ${s.bible.trim() || '（使用者還沒寫設定集，請依前情合理發揮）'}
 
-【前情（最近的內容）】
+${nvEarlier() ? `【更早的劇情提要】\n${nvEarlier()}\n\n` : ''}【前情（最近的內容，新的段落要緊接在這後面）】
 ${nvContext() || '（故事才剛開始）'}
 
 【主角這一步】
@@ -6703,6 +6735,7 @@ function nvTabWrite() {
     warn.length ? h('div', { class: 'nv-adv' }, warn.map(w => h('div', {}, '⚠ ' + w))) : null,
     h('div', { class: 'nv-name', style: 'margin-top:8px' }, '前情'),
     scene,
+    !s.docTail ? h('button', { class: 'btn small', type: 'button', style: 'margin-top:6px', onclick: () => { ui.tab = 'book'; go('novel'); } }, '📥 前面已經寫好了？匯入後讓 Gemini 接著寫') : null,
     stage,
     s.gasUrl && unsent ? h('button', { class: 'btn block', type: 'button', style: 'margin-top:12px', disabled: busy,
       onclick: () => nvRun('送到 Google 文件…', async () => { const k = await nvPush(); toast(`已補送 ${k} 段到 Google 文件`); }) }, `有 ${unsent} 段還沒送到 Google 文件，按這裡補送`) : null);
@@ -6793,6 +6826,26 @@ ${s.bible.trim()}`, true));
           nvSave();
         });
       } }, '請 Gemini 確認角色性格'),
+      h('button', { class: 'btn block', type: 'button', style: 'margin-top:8px', disabled: busy, onclick: () => {
+        if (!nvFullText().trim()) return toast('還沒有小說內容，先到「我的小說」分頁匯入前面寫好的內容');
+        nvRun('Gemini 正在比對劇情和設定集…', async () => {
+          const d = nvParseJson(await nvGemini(`下面是一部小說的設定集，以及目前寫到的內容。使用者扮演主角「${nvHero()}」，之後由你依設定集扮演其他角色。請比對劇情和設定集，找出設定集需要補充的地方。用繁體中文（台灣用語）、純文字，不要用 Markdown 符號：
+roles：劇情裡已經出現、但設定集還沒寫到（或寫得跟不上劇情發展）的事，每筆一句，格式「角色名：劇情中表現出來的性格、能力、關係或經歷」。設定集裡完全沒有的新角色也要列出來。最多 15 筆。
+questions：為了讓之後的劇情不走樣，需要作者決定並補充的角色設定，每筆一個問句，要具體指出是哪個角色、哪個情境（最多 8 筆）。設定集裡【補充設定】已經回答過的不要再問。
+conflicts：劇情和設定集對不上的地方，每筆一句話說明（沒有就給空陣列）。
+只輸出 JSON，格式：{"roles":["……"],"questions":["……"],"conflicts":["……"]}
+
+【設定集】
+${s.bible.trim() || '（還沒寫）'}
+
+${nvEarlier() ? `【更早的劇情提要】\n${nvEarlier()}\n\n` : ''}【目前的小說內容（最近的部分）】
+${nvContext()}`, true));
+          const arr = (v, max) => (Array.isArray(v) ? v : []).map(x => String(x || '').trim()).filter(Boolean).slice(0, max);
+          s.bibleCheck = { mode: 'story', roles: arr(d.roles, 15), questions: arr(d.questions, 8).map(q => ({ q, a: '' })), conflicts: arr(d.conflicts, 8).map(q => ({ q, a: '' })) };
+          s.bibleNote = '';
+          nvSave();
+        });
+      } }, '依目前劇情，找出要補充的角色設定'),
       nvCheckBlock()));
 }
 
@@ -6815,20 +6868,53 @@ function nvCheckBlock() {
     if (!s.gasUrl) { toast(`✔ 已把 ${done.length} 點回覆寫進設定集`); return nvRedraw(); }
     nvRun('把設定集寫到 Google 文件…', async () => { await nvBiblePush(); toast(`✔ 已把 ${done.length} 點回覆寫進設定集，並更新 Google 文件`); });
   };
+  const story = c.mode === 'story';
+  const addRoles = () => {   // 劇情裡已經演出來的事，整批加進設定集
+    s.bible = s.bible.trim() + (s.bible.includes('【從劇情整理的設定】') ? '' : '\n\n【從劇情整理的設定】') + c.roles.map(r => '\n・' + r).join('');
+    c.roles = []; s.bibleDirty = true; nvSave();
+    if (!s.gasUrl) { toast('✔ 已加進設定集'); return nvRedraw(); }
+    nvRun('把設定集寫到 Google 文件…', async () => { await nvBiblePush(); toast('✔ 已加進設定集，並更新 Google 文件'); });
+  };
   return h('div', { class: 'nv-adv' },
-    h('b', {}, '一、Gemini 理解到的角色性格'),
-    c.roles.length ? c.roles.map(r => h('div', {}, '・' + r)) : h('div', {}, '（沒有回覆）'),
-    h('b', { style: 'display:block;margin-top:12px' }, '二、設定不夠清楚、容易走樣的地方'),
+    h('b', {}, story ? '一、劇情裡已經出現、設定集還沒寫到的事' : '一、Gemini 理解到的角色性格'),
+    c.roles.length ? c.roles.map(r => h('div', {}, '・' + r)) : h('div', {}, story ? '沒有，或已經加進設定集了。' : '（沒有回覆）'),
+    story && c.roles.length ? h('button', { class: 'btn small', type: 'button', style: 'margin-top:6px', disabled: busy, onclick: addRoles }, '這些都對，整批加進設定集') : null,
+    h('b', { style: 'display:block;margin-top:12px' }, story ? '二、請你補充的角色設定' : '二、設定不夠清楚、容易走樣的地方'),
     c.questions.length ? c.questions.map(item) : h('div', {}, '都回覆完了，或沒有需要補充的。'),
-    h('b', { style: 'display:block;margin-top:12px' }, '三、互相矛盾的地方'),
+    h('b', { style: 'display:block;margin-top:12px' }, story ? '三、劇情和設定集對不上的地方' : '三、互相矛盾的地方'),
     c.conflicts.length ? c.conflicts.map(item) : h('div', {}, '沒有發現，或都回覆完了。'),
     pending.length ? h('button', { class: 'btn pri block', type: 'button', style: 'margin-top:12px', disabled: busy, onclick: apply }, '把回覆寫進設定集') : null,
     pending.length ? h('div', { style: 'margin-top:6px;font-size:.88rem' }, '有寫回覆的會加到設定集最後面的【補充設定】，並從這裡消失；沒寫的會留著。') : null);
 }
 
 function nvTabBook() {
-  const s = nvS(), all = s.story.map(p => p.text).join('\n\n');
+  const s = nvS(), all = s.story.map(p => p.text).join('\n\n'), ui = NV.ui, busy = !!ui.busy;
+  const total = nvFullText().length, done = n => toast(`✔ 已匯入 ${n} 字${n > NV.MAX_DOC ? `（只保留最後 ${NV.MAX_DOC} 字）` : ''}，Gemini 會接著後面寫`, 5000);
   return h('div', {},
+    h('div', { class: 'card' },
+      h('h2', {}, '前面已經寫好的內容'),
+      h('div', { class: 'sub' }, s.docTail
+        ? `已匯入 ${s.docTail.length} 字，加上在這裡寫的共 ${total} 字。Gemini 每次會讀最後 ${Math.min(total, NV.CTX)} 字原文${total > NV.CTX ? (s.synopsis ? '，更早的部分讀劇情提要' : '；更早的部分還沒有劇情提要') : ''}。`
+        : '把之前寫好的小說匯入，Gemini 就會接著後面寫，新段落也會加在 Google 文件最後面。'),
+      h('button', { class: 'btn pri block', type: 'button', style: 'margin-top:10px', disabled: busy,
+        onclick: () => nvRun('讀取 Google 文件全文，並整理劇情提要（字數多的話要等一下）…', async () => {
+          const d = await nvGas({ action: 'tail', n: NV.MAX_DOC });
+          await nvImport(d.text); done(d.length || String(d.text).length);
+        }) }, s.docTail ? '重新從 Google 文件讀取全文' : '從 Google 文件讀取全文'),
+      h('div', { class: 'hint' }, '讀的是「連線設定」裡接上的那份小說文件。在 Google 文件裡直接改過內容之後，回來再按一次。'),
+      h('details', { style: 'margin-top:8px' },
+        h('summary', { style: 'cursor:pointer' }, '還沒接上 Google 文件？改用貼上的'),
+        h('textarea', { class: 'nv-ta', rows: 6, style: 'margin-top:8px', placeholder: '在 Google 文件按 Ctrl+A 全選、Ctrl+C 複製，再貼到這裡', oninput: e => { ui.paste = e.target.value; } }, ui.paste),
+        h('button', { class: 'btn block', type: 'button', style: 'margin-top:8px', disabled: busy, onclick: () => {
+          if (!ui.paste.trim()) return toast('先把內容貼進來');
+          nvRun('匯入貼上的內容，並整理劇情提要…', async () => { const n = await nvImport(ui.paste); ui.paste = ''; done(n); });
+        } }, '匯入貼上的內容')),
+      total > NV.CTX ? h('div', { style: 'margin-top:12px' },
+        h('div', { class: 'row between' }, h('b', {}, '更早的劇情提要'),
+          h('button', { class: 'btn small', type: 'button', disabled: busy, onclick: () => nvRun('Gemini 正在整理劇情提要…', async () => { await nvSynopsis(); toast('✔ 劇情提要已更新'); }) }, s.synopsis ? '重新整理' : '請 Gemini 整理')),
+        s.synopsis ? h('textarea', { class: 'nv-ta', rows: 8, style: 'margin-top:6px', oninput: e => { s.synopsis = e.target.value; nvSave(); } }, s.synopsis)
+          : h('div', { class: 'hint' }, '還沒有提要（要先設定 Gemini 金鑰）。沒有提要時，Gemini 只知道最後這一段的內容。'),
+        s.synopsis ? h('div', { class: 'hint' }, '提要可以直接修改，改了就會存起來。') : null) : null),
     h('div', { class: 'card' },
       h('div', { class: 'row between' },
         h('h2', { style: 'margin:0' }, `在這裡寫的 ${s.story.length} 段`),
@@ -6871,11 +6957,10 @@ function nvTabConn() {
       h('input', { class: 'nv-in', type: 'url', value: s.gasUrl, placeholder: 'https://script.google.com/macros/s/…/exec', oninput: e => { s.gasUrl = e.target.value.trim(); nvSave(); } }),
       h('button', { class: 'btn block', type: 'button', style: 'margin-top:8px', disabled: busy,
         onclick: () => nvRun('讀取 Google 文件…', async () => {
-          const d = await nvGas({ action: 'tail', n: 3000 });
-          s.docTail = String(d.text || ''); s.tailAt = s.story.length; nvSave();
-          toast(`✔ 連線成功，文件目前約 ${d.length} 字，已讀取結尾當作前情`);
-        }) }, '測試連線（順便讀取文件結尾當前情）'),
-      h('div', { class: 'hint' }, '如果你有在 Google 文件裡直接改過小說，回來按一次上面的按鈕，Gemini 才會接到最新的內容。')));
+          const d = await nvGas({ action: 'tail', n: 200 });
+          toast(`✔ 連線成功，文件目前約 ${d.length} 字。要讓 Gemini 接著寫，到「我的小說」分頁按「從 Google 文件讀取全文」`, 6000);
+        }) }, '測試連線'),
+      h('div', { class: 'hint' }, '前面已經寫好的內容，到「我的小說」分頁匯入；在 Google 文件裡直接改過小說之後，也到那裡重新讀取一次。')));
 }
 
 </script>
