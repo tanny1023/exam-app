@@ -6405,15 +6405,19 @@ function nvS() {
   return NV.cache;
 }
 function nvSave() { if (!store.set(NV.KEY, NV.cache)) toast('⚠ 儲存失敗（瀏覽器空間不足），請先到「我的小說」複製全文備份'); }
-const nvTickets = () => { const s = nvS(); return Math.max(0, Math.floor(s.answered / NV.PER) - s.used); };
-const nvToNext = () => NV.PER - (nvS().answered % NV.PER);
+// 寫作資格：完成一次測驗（全部作答並看到結果）的當下可以寫一段；只放在記憶體，沒寫就離開（回首頁、開別的畫面、重新整理）就算放棄
+const nvTickets = () => NV.pass ? 1 : 0;
+const nvResetWrite = () => Object.assign(NV.ui, { input: '', options: null, advice: '', pick: -1, draft: '' });
+function nvOnExam(ok) { NV.pass = !!ok; nvResetWrite(); }       // 主程式考完（finishSession）時呼叫
+function nvOnGo(screen) {                                        // 主程式每次換畫面（go）時呼叫
+  if (NV.pass && screen !== 'result' && screen !== 'novel') { NV.pass = false; nvResetWrite(); }
+}
 
 // 主程式每記錄一題作答就呼叫一次
 function nvOnAnswer() {
   const s = nvS();
   s.answered++;
   nvSave();
-  if (s.answered % NV.PER === 0) toast(`✍️ 解鎖一段小說！目前可以寫 ${nvTickets()} 段`, 2500);
 }
 
 /* ---- Gemini ---- */
@@ -6679,31 +6683,33 @@ function nvStyle() {
 
 /* ---- 首頁卡片 ---- */
 function novelCard() {
-  const s = nvS(), n = nvTickets();
-  const today = store.get(K('daily'), {})[dateStr()] || 0, goal = (S.settings.dailySets || 20) * SET_SIZE;
+  const s = nvS();
   return h('div', { class: 'card' },
-    h('div', { class: 'row between' },
-      h('h2', { style: 'margin:0' }, '✍️ 寫小說'),
-      h('span', { class: 'nv-badge' }, n > 0 ? `可以寫 ${n} 段` : `再答 ${nvToNext()} 題解鎖`)),
-    h('div', { class: 'sub', style: 'margin-top:4px' }, `每答 ${NV.PER} 題可以寫一段。今天已答 ${today} / ${goal} 題${today >= goal ? ' ✔' : ''}，已寫 ${s.story.length} 段。`),
-    h('button', { class: n > 0 ? 'btn pri block' : 'btn block', type: 'button', style: 'margin-top:10px', onclick: () => { NV.ui.tab = s.bible.trim() ? 'write' : 'bible'; go('novel'); } },
-      !s.bible.trim() ? '先寫設定集' : n > 0 ? '去寫小說' : '打開小說'));
+    h('h2', { style: 'margin:0' }, '✍️ 寫小說'),
+    h('div', { class: 'sub', style: 'margin-top:4px' }, `每完成一次測驗，在結果頁可以寫一段；當下沒寫就離開，那次就算放棄。已寫 ${s.story.length} 段。`),
+    h('button', { class: 'btn block', type: 'button', style: 'margin-top:10px', onclick: () => { NV.ui.tab = 'bible'; go('novel'); } }, '設定集／我的小說／連線設定'));
 }
 // 測驗結果頁的按鈕
 function novelResultBtn() {
-  const n = nvTickets();
-  return n > 0 ? h('button', { class: 'btn pri block', type: 'button', style: 'margin-top:10px', onclick: () => { NV.ui.tab = 'write'; go('novel'); } }, `✍️ 寫一段小說（可以寫 ${n} 段）`) : null;
+  if (nvTickets() < 1) return null;
+  return h('div', {},
+    h('button', { class: 'btn pri block', type: 'button', style: 'margin-top:10px', onclick: () => { NV.ui.tab = nvS().bible.trim() ? 'write' : 'bible'; go('novel'); } }, '✍️ 考完了，寫一段小說'),
+    h('div', { class: 'hint', style: 'margin-top:4px' }, '只有現在可以寫：離開這一頁去做別的事，這次就算放棄，要再考一次才能寫。'));
 }
 
 /* ---- 小說畫面 ---- */
 function viewNovel() {
   nvStyle();
   const ui = NV.ui, n = nvTickets();
-  const tabs = [['write', '寫作'], ['bible', '設定集'], ['book', '我的小說'], ['conn', '連線設定']];
+  const tabs = [['write', '寫作'], ['bible', '設定集'], ['book', '我的小說'], ['conn', '連線設定']].filter(x => n > 0 || x[0] !== 'write');
+  if (n < 1 && ui.tab === 'write') ui.tab = 'bible';   // 沒有寫作資格（還沒考試或已經寫過）就不顯示寫作分頁
   return h('div', {},
     h('div', { class: 'row between' },
-      h('button', { class: 'btn small', type: 'button', onclick: () => go('home') }, '‹ 回去做題目'),
-      h('span', { class: 'nv-badge' }, n > 0 ? `可以寫 ${n} 段` : `再答 ${nvToNext()} 題解鎖`)),
+      h('button', { class: 'btn small', type: 'button', onclick: () => {
+        if (n > 0 && !confirm('現在離開就放棄這次寫小說的機會，要再考一次才能寫。確定離開嗎？')) return;
+        go('home');
+      } }, '‹ 回去做題目'),
+      h('span', { class: 'nv-badge' }, n > 0 ? '這次可以寫 1 段' : '考完一次測驗才能寫')),
     h('div', { class: 'seg', style: 'margin:10px 0' }, tabs.map(([id, name]) =>
       h('button', { type: 'button', class: ui.tab === id ? 'on' : '', onclick: () => { ui.tab = id; go('novel'); } }, name))),
     ui.busy ? h('div', { class: 'card', style: 'border-color:var(--pri)' }, '⏳ ' + ui.busy) : null,
@@ -6728,7 +6734,7 @@ function nvTabWrite() {
   let stage;
   if (n < 1) {
     stage = h('div', { class: 'card' },
-      h('b', {}, `再答 ${nvToNext()} 題考古題，就能寫下一段。`),
+      h('b', {}, '完成一次測驗後，才能寫下一段。'),
       h('button', { class: 'btn pri block', type: 'button', style: 'margin-top:10px', onclick: () => go('home') }, '回去做題目'));
   } else if (!ui.options) {
     // 第一步：這一段的劇情大綱／方向（也可以不寫，讓 Gemini 隨機生成）
@@ -6749,7 +6755,7 @@ function nvTabWrite() {
       h('div', { class: 'nv-name' }, ui.pick === -2 ? '📜 這一段（自己寫）' : '📜 這一段（可以直接修改）'),
       h('textarea', { class: 'nv-ta', rows: 10, placeholder: '在這裡寫下這一段的內容', oninput: e => { ui.draft = e.target.value; } }, ui.draft),
       h('div', { class: 'row', style: 'margin-top:8px' },
-        h('button', { class: 'btn pri grow', type: 'button', disabled: busy, onclick: () => nvCommit() }, '寫入小說（用掉 1 段）'),
+        h('button', { class: 'btn pri grow', type: 'button', disabled: busy, onclick: () => nvCommit() }, '寫入小說'),
         h('button', { class: 'btn', type: 'button', disabled: busy, onclick: () => nvPolish() }, '✨ 請 Gemini 潤稿'))) : null;
     // 換選項時，如果框裡的內容已經手動改過，先問一下，免得改好的字被蓋掉
     const choose = (i, text) => {
@@ -6823,12 +6829,13 @@ ${ui.draft.trim()}`, false);
 function nvCommit() {
   const ui = NV.ui, s = nvS(), text = ui.draft.trim();
   if (!text) return toast('這一段是空的');
-  if (nvTickets() < 1) return toast(`再答 ${nvToNext()} 題才能寫下一段`);
+  if (nvTickets() < 1) return toast('要先完成一次測驗才能寫');
   nvRun('寫入小說…', async () => {
     s.story.push({ t: Date.now(), text, sent: false });
     s.used++;
     nvSave();
-    Object.assign(ui, { input: '', options: null, advice: '', pick: -1, draft: '' });
+    NV.pass = false;     // 一次測驗只能寫一段
+    nvResetWrite(); ui.tab = 'book';
     if (!s.gasUrl) return toast('已存在這台裝置（還沒連 Google 文件）');
     await nvPush();
     toast('✔ 已寫入 Google 文件');
@@ -7339,7 +7346,7 @@ function record(q, ok) {
   const daily = store.get(K('daily'), {}), day = dateStr();
   daily[day] = (daily[day] || 0) + 1;
   store.set(K('daily'), daily);
-  nvOnAnswer();   // 小說模式：每答 5 題解鎖寫一段（novel.js）
+  nvOnAnswer();   // 小說模式：累計作答題數（novel.js）
   syncSoon();
 }
 
@@ -7789,6 +7796,7 @@ function exportExcel() {
  * 畫面
  * ============================================================ */
 function go(screen, keepScroll) {
+  nvOnGo(screen);   // 小說模式：考完沒寫就離開結果頁，這次的寫作資格作廢（novel.js）
   S.screen = screen;
   if (screen === 'home' || screen === 'result') S.study = null;
   if (screen !== 'quiz' || !keepScroll) stopSpeak();   // 換題或離開作答畫面就停止念題
@@ -8562,6 +8570,7 @@ function finishSession(confirmUnanswered, timeUp) {
   S.result = { ids: s.ids, answers: s.answers, mode: s.mode, from: s.from, task: s.task, timeUp: !!timeUp, elapsed: s.elapsed || 0, away: s.away || 0, awaySec: s.awaySec || 0 };
   S.session = null;
   persistSession();
+  nvOnExam(unanswered === 0);   // 小說模式：全部作答完的測驗，考完當下可以寫一段（novel.js）
   go('result');
 }
 
