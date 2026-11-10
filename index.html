@@ -6369,6 +6369,426 @@ window.FIREBASE_CONFIG = {
 </script>
 <script>
 'use strict';
+/* ============================================================
+ * 小說模式：每答 5 題考古題，解鎖寫一段小說
+ *
+ * 玩法（像 RPG 對話）：
+ *   1. 先在「設定集」寫好世界觀與角色性格
+ *   2. 你扮演主角，輸入主角這一步說什麼／做什麼
+ *   3. Gemini 依設定集寫出 3～5 種「其他角色的反應」或「劇情走向」，並適時給建議
+ *   4. 你挑一種（可以再改），按「寫入小說」→ 自動加到 Google 文件最後面
+ *
+ * 資料只存在這台裝置的 localStorage（novel.state），不跟著雲端同步；
+ * 小說本文會送到 Google 文件，所以換裝置也看得到。
+ * 這個檔案比主程式早載入，裡面用到的 h／store／go／toast／S／K 都在呼叫時才取用。
+ * ============================================================ */
+const NV = {
+  KEY: 'novel.state',
+  PER: 5,                         // 每答幾題解鎖一段
+  DEFAULT_MODEL: 'gemini-2.5-flash',
+  cache: null,
+  ui: { tab: 'write', input: '', options: null, advice: '', pick: -1, draft: '', busy: '', note: '' },
+};
+
+function nvS() {
+  if (!NV.cache) {
+    NV.cache = Object.assign({ answered: 0, used: 0, apiKey: '', model: NV.DEFAULT_MODEL, models: [], gasUrl: '', token: '',
+      hero: '', bible: '', bibleNote: '', story: [], docTail: '', tailAt: 0 }, store.get(NV.KEY, {}));
+    if (!NV.cache.token) {      // 給 Google 文件那段程式用的密語：自動產生，避免別人拿到網址就能寫你的文件
+      const a = new Uint8Array(12); crypto.getRandomValues(a);
+      NV.cache.token = Array.from(a, x => x.toString(36).padStart(2, '0')).join('').slice(0, 20);
+      nvSave();
+    }
+  }
+  return NV.cache;
+}
+function nvSave() { if (!store.set(NV.KEY, NV.cache)) toast('⚠ 儲存失敗（瀏覽器空間不足），請先到「我的小說」複製全文備份'); }
+const nvTickets = () => { const s = nvS(); return Math.max(0, Math.floor(s.answered / NV.PER) - s.used); };
+const nvToNext = () => NV.PER - (nvS().answered % NV.PER);
+
+// 主程式每記錄一題作答就呼叫一次
+function nvOnAnswer() {
+  const s = nvS();
+  s.answered++;
+  nvSave();
+  if (s.answered % NV.PER === 0) toast(`✍️ 解鎖一段小說！目前可以寫 ${nvTickets()} 段`, 2500);
+}
+
+/* ---- Gemini ---- */
+async function nvGemini(prompt, json) {
+  const s = nvS();
+  if (!s.apiKey) throw new Error('還沒設定 Gemini API 金鑰，請到「連線設定」貼上');
+  const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(s.model || NV.DEFAULT_MODEL)}:generateContent`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': s.apiKey },
+    body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig: Object.assign({ temperature: 1 }, json ? { responseMimeType: 'application/json' } : {}) }),
+  });
+  const d = await r.json().catch(() => null);
+  if (!r.ok) throw new Error('Gemini 回報錯誤：' + ((d && d.error && d.error.message) || r.status));
+  const parts = ((((d && d.candidates) || [])[0] || {}).content || {}).parts || [];
+  const text = parts.map(p => p.text || '').join('').trim();
+  if (!text) throw new Error('Gemini 沒有回內容（可能被安全過濾擋下），換個寫法再試一次');
+  return text;
+}
+function nvParseJson(text) {
+  text = text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+  try { return JSON.parse(text); } catch (e) {}
+  const a = text.indexOf('{'), b = text.lastIndexOf('}');
+  if (a >= 0 && b > a) { try { return JSON.parse(text.slice(a, b + 1)); } catch (e) {} }
+  throw new Error('Gemini 回的格式看不懂，請再按一次');
+}
+async function nvListModels() {
+  const s = nvS();
+  if (!s.apiKey) throw new Error('請先貼上 Gemini API 金鑰');
+  const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200', { headers: { 'x-goog-api-key': s.apiKey } });
+  const d = await r.json().catch(() => null);
+  if (!r.ok) throw new Error('金鑰無法使用：' + ((d && d.error && d.error.message) || r.status));
+  const list = ((d && d.models) || []).filter(m => (m.supportedGenerationMethods || []).includes('generateContent') && /gemini/i.test(m.name))
+    .map(m => m.name.replace(/^models\//, ''));
+  if (!list.length) throw new Error('這把金鑰沒有可用的 Gemini 模型');
+  s.models = list;
+  if (!list.includes(s.model)) s.model = list.find(m => /flash/i.test(m) && !/lite|image|tts|live|preview|exp/i.test(m)) || list[0];
+  nvSave();
+  return list;
+}
+
+// 前情：Google 文件的結尾（讀取當下）＋之後在這裡寫入的段落，取最後 3000 字
+function nvContext() {
+  const s = nvS();
+  const t = [s.docTail].concat(s.story.slice(s.tailAt).map(p => p.text)).filter(Boolean).join('\n');
+  return t.slice(-3000);
+}
+const nvHero = () => nvS().hero.trim() || '主角';
+
+function nvTurnPrompt(input) {
+  const s = nvS();
+  return `你是一部小說的共同作者，同時是 RPG 的遊戲主持人。使用者扮演主角「${nvHero()}」，你負責其他角色與劇情。
+
+【設定集】
+${s.bible.trim() || '（使用者還沒寫設定集，請依前情合理發揮）'}
+
+【前情（最近的內容）】
+${nvContext() || '（故事才剛開始）'}
+
+【主角這一步】
+${input}
+
+請嚴格依照設定集裡每個角色的性格，寫出 3 到 5 種「其他角色可能的反應」或「接下來的劇情走向」，彼此要明顯不同（態度、後果或節奏不同）。
+規則：
+1. 不要替主角決定新的台詞或重大行動，主角由使用者扮演。
+2. text 用小說的筆法，繁體中文、台灣用語，80 到 200 字，可以有對話與動作描寫，要能直接接在主角這一步後面。
+3. kind 只能是「角色反應」或「劇情走向」；title 10 個字以內，讓人一眼看出這個選項的方向。
+4. advice 是給作者的建議 1 到 2 句（例如伏筆、節奏、哪個角色快走樣了、下一步可以怎麼演）；沒有值得提的就給空字串。
+只輸出 JSON，格式：{"options":[{"kind":"角色反應","title":"……","text":"……"}],"advice":"……"}`;
+}
+
+/* ---- Google 文件（透過使用者自己部署的 Apps Script） ---- */
+async function nvGas(payload) {
+  const s = nvS();
+  if (!s.gasUrl) throw new Error('還沒設定 Google 文件的網址，請到「連線設定」');
+  let d;
+  try {
+    const r = await fetch(s.gasUrl, { method: 'POST', body: JSON.stringify(Object.assign({ token: s.token }, payload)) });
+    d = await r.json();
+  } catch (e) { throw new Error('連不上 Google 文件（請檢查網址，以及部署時「誰可以存取」是否選「所有人」）'); }
+  if (!d || !d.ok) throw new Error('Google 文件回報：' + ((d && d.error) || '失敗'));
+  return d;
+}
+async function nvPush() {   // 把還沒送到 Google 文件的段落依序送出
+  const s = nvS();
+  if (!s.gasUrl) return 0;
+  let n = 0;
+  for (const p of s.story) {
+    if (p.sent) continue;
+    await nvGas({ action: 'append', text: p.text });
+    p.sent = true; n++; nvSave();
+  }
+  return n;
+}
+function nvScript() {
+  return `// 小說自動寫入：貼到 Google 文件的「擴充功能 → Apps Script」，再部署成網頁應用程式
+const TOKEN = '${nvS().token}';   // 密語：要跟考古題 APP 裡的一樣（已自動填好，不用改）
+
+function doPost(e) {
+  try {
+    const d = JSON.parse(e.postData.contents);
+    if (d.token !== TOKEN) return out({ ok: false, error: '密語不對' });
+    const body = DocumentApp.getActiveDocument().getBody();
+    if (d.action === 'append') {
+      String(d.text).split(/\\n+/).forEach(function (p) { if (p.trim()) body.appendParagraph(p); });
+      return out({ ok: true });
+    }
+    if (d.action === 'tail') {
+      const t = body.getText();
+      return out({ ok: true, text: t.slice(-(d.n || 3000)), length: t.length });
+    }
+    return out({ ok: false, error: '不認得的動作' });
+  } catch (err) {
+    return out({ ok: false, error: String(err) });
+  }
+}
+
+function out(o) {
+  return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON);
+}
+`;
+}
+
+/* ---- 畫面共用 ---- */
+const nvRedraw = () => { if (S.screen === 'novel') go('novel', true); };
+async function nvRun(msg, fn) {   // 執行要等的動作：顯示「處理中」、出錯用提示框
+  if (NV.ui.busy) return;
+  NV.ui.busy = msg; nvRedraw();
+  try { await fn(); } catch (e) { toast('✘ ' + (e && e.message || e), 6000); }
+  NV.ui.busy = ''; nvRedraw();
+}
+async function nvCopy(text, okMsg) {
+  try { await navigator.clipboard.writeText(text); toast(okMsg || '已複製'); }
+  catch (e) { toast('複製失敗，請手動選取文字複製'); }
+}
+function nvStyle() {
+  if (document.getElementById('nvStyle')) return;
+  document.head.append(h('style', { id: 'nvStyle' }, `
+.nv-scene{background:#10162b;color:#eef1ff;border:3px double #8fa4ff;border-radius:10px;padding:12px 14px;white-space:pre-wrap;word-break:break-word;max-height:38vh;overflow:auto;line-height:1.8}
+.nv-scene .old{opacity:.6}
+.nv-name{display:inline-block;background:#8fa4ff;color:#10162b;font-weight:700;padding:2px 12px;border-radius:8px 8px 0 0;margin-top:14px}
+.nv-ta{width:100%;font:inherit;line-height:1.7;padding:10px;border:2px solid var(--line);border-radius:10px;background:var(--card);color:inherit;resize:vertical}
+.nv-ta:focus{border-color:var(--pri);outline:0}
+.nv-in{width:100%;font:inherit;padding:8px 10px;min-height:44px;border:1px solid var(--line);border-radius:10px;background:var(--card);color:inherit}
+.nv-opt{display:block;width:100%;text-align:left;background:var(--card);color:var(--fg);border:2px solid var(--line);border-radius:12px;padding:10px 12px;margin-top:8px;cursor:pointer;white-space:pre-wrap;word-break:break-word}
+.nv-opt.sel{border-color:var(--pri);background:var(--selbg)}
+.nv-opt b{display:block;margin-bottom:2px}
+.nv-kind{font-size:.78rem;color:var(--muted);font-weight:400;margin-left:6px}
+.nv-adv{margin-top:10px;padding:10px 12px;border-radius:10px;background:#fff3c4;color:#3b2f00;font-size:.95rem;white-space:pre-wrap}
+.nv-badge{font-weight:700;color:#ea580c}
+.nv-code{font:12px/1.5 ui-monospace,Consolas,monospace;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px;max-height:200px;overflow:auto;white-space:pre}
+.nv-steps{margin:6px 0;padding-left:22px;font-size:.93rem}
+.nv-p{padding:10px 0;border-top:1px solid var(--line);white-space:pre-wrap;word-break:break-word}
+.nv-p:first-child{border-top:0}
+`));
+}
+
+/* ---- 首頁卡片 ---- */
+function novelCard() {
+  const s = nvS(), n = nvTickets();
+  const today = store.get(K('daily'), {})[dateStr()] || 0, goal = (S.settings.dailySets || 20) * SET_SIZE;
+  return h('div', { class: 'card' },
+    h('div', { class: 'row between' },
+      h('h2', { style: 'margin:0' }, '✍️ 寫小說'),
+      h('span', { class: 'nv-badge' }, n > 0 ? `可以寫 ${n} 段` : `再答 ${nvToNext()} 題解鎖`)),
+    h('div', { class: 'sub', style: 'margin-top:4px' }, `每答 ${NV.PER} 題可以寫一段。今天已答 ${today} / ${goal} 題${today >= goal ? ' ✔' : ''}，已寫 ${s.story.length} 段。`),
+    h('button', { class: n > 0 ? 'btn pri block' : 'btn block', type: 'button', style: 'margin-top:10px', onclick: () => { NV.ui.tab = s.bible.trim() ? 'write' : 'bible'; go('novel'); } },
+      !s.bible.trim() ? '先寫設定集' : n > 0 ? '去寫小說' : '打開小說'));
+}
+// 測驗結果頁的按鈕
+function novelResultBtn() {
+  const n = nvTickets();
+  return n > 0 ? h('button', { class: 'btn pri block', type: 'button', style: 'margin-top:10px', onclick: () => { NV.ui.tab = 'write'; go('novel'); } }, `✍️ 寫一段小說（可以寫 ${n} 段）`) : null;
+}
+
+/* ---- 小說畫面 ---- */
+function viewNovel() {
+  nvStyle();
+  const ui = NV.ui, n = nvTickets();
+  const tabs = [['write', '寫作'], ['bible', '設定集'], ['book', '我的小說'], ['conn', '連線設定']];
+  return h('div', {},
+    h('div', { class: 'row between' },
+      h('button', { class: 'btn small', type: 'button', onclick: () => go('home') }, '‹ 回去做題目'),
+      h('span', { class: 'nv-badge' }, n > 0 ? `可以寫 ${n} 段` : `再答 ${nvToNext()} 題解鎖`)),
+    h('div', { class: 'seg', style: 'margin:10px 0' }, tabs.map(([id, name]) =>
+      h('button', { type: 'button', class: ui.tab === id ? 'on' : '', onclick: () => { ui.tab = id; go('novel'); } }, name))),
+    ui.busy ? h('div', { class: 'card', style: 'border-color:var(--pri)' }, '⏳ ' + ui.busy) : null,
+    { write: nvTabWrite, bible: nvTabBible, book: nvTabBook, conn: nvTabConn }[ui.tab]());
+}
+
+function nvTabWrite() {
+  const s = nvS(), ui = NV.ui, n = nvTickets(), busy = !!ui.busy;
+  const recent = s.story.slice(-2).map(p => p.text);
+  const scene = h('div', { class: 'nv-scene' },
+    recent.length ? recent.map((t, i) => h('div', { class: i < recent.length - 1 ? 'old' : '', style: 'margin-bottom:8px' }, t))
+      : s.docTail ? '……' + s.docTail.slice(-400)
+      : '故事還沒開始。寫下主角的第一步吧。');
+  setTimeout(() => { scene.scrollTop = scene.scrollHeight; }, 0);
+
+  const warn = [
+    !s.bible.trim() ? '還沒寫設定集，Gemini 不知道角色的性格（到「設定集」分頁）。' : null,
+    !s.apiKey ? '還沒設定 Gemini API 金鑰（到「連線設定」分頁）。' : null,
+    !s.gasUrl ? '還沒連上 Google 文件，寫好的段落會先存在這台裝置（到「連線設定」分頁）。' : null,
+  ].filter(Boolean);
+
+  let stage;
+  if (n < 1) {
+    stage = h('div', { class: 'card' },
+      h('b', {}, `再答 ${nvToNext()} 題考古題，就能寫下一段。`),
+      h('button', { class: 'btn pri block', type: 'button', style: 'margin-top:10px', onclick: () => go('home') }, '回去做題目'));
+  } else if (!ui.options) {
+    // 第一步：主角說什麼／做什麼
+    const ta = h('textarea', { class: 'nv-ta', rows: 4, placeholder: '例：我把信收進口袋，看著她說：「這件事妳早就知道了，對吧？」', oninput: e => { ui.input = e.target.value; } }, ui.input);
+    stage = h('div', {},
+      h('div', { class: 'nv-name' }, `▶ ${nvHero()}（你）`),
+      ta,
+      h('div', { class: 'row', style: 'margin-top:8px' },
+        h('button', { class: 'btn pri grow', type: 'button', disabled: busy, onclick: () => nvAsk() }, '🎲 看看大家的反應'),
+        h('button', { class: 'btn', type: 'button', disabled: busy, onclick: () => {
+          if (!ui.input.trim()) return toast('先寫下這一段的內容');
+          ui.options = []; ui.advice = ''; ui.pick = 0; ui.draft = ui.input.trim(); nvRedraw();
+        } }, '不問 Gemini，直接寫入')));
+  } else {
+    // 第二步：挑一種反應／走向，確認後寫入
+    const draft = ui.pick >= 0 ? h('div', { style: 'margin-top:12px' },
+      h('div', { class: 'nv-name' }, '📜 這一段（可以直接修改）'),
+      h('textarea', { class: 'nv-ta', rows: 8, oninput: e => { ui.draft = e.target.value; } }, ui.draft),
+      h('div', { class: 'row', style: 'margin-top:8px' },
+        h('button', { class: 'btn pri grow', type: 'button', disabled: busy, onclick: () => nvCommit() }, '寫入小說（用掉 1 段）'),
+        h('button', { class: 'btn', type: 'button', disabled: busy, onclick: () => nvPolish() }, '✨ 請 Gemini 潤稿'))) : null;
+    stage = h('div', {},
+      h('div', { class: 'card', style: 'margin-top:14px' },
+        h('div', { class: 'sub' }, `${nvHero()}：`), h('div', { style: 'white-space:pre-wrap' }, ui.input.trim())),
+      ui.advice ? h('div', { class: 'nv-adv' }, '💡 ' + ui.advice) : null,
+      ui.options.length ? h('div', { class: 'hint' }, '挑一種反應或走向：') : null,
+      ui.options.map((o, i) => h('button', { type: 'button', class: 'nv-opt' + (ui.pick === i ? ' sel' : ''), onclick: () => {
+        ui.pick = i; ui.draft = ui.input.trim() + '\n' + o.text; nvRedraw();
+      } }, h('b', {}, `${ui.pick === i ? '▶' : '▷'} ${o.title}`, h('span', { class: 'nv-kind' }, o.kind)), o.text)),
+      h('div', { class: 'row', style: 'margin-top:10px' },
+        h('button', { class: 'btn grow', type: 'button', disabled: busy, onclick: () => nvAsk() }, '🔄 換一批'),
+        h('button', { class: 'btn grow', type: 'button', disabled: busy, onclick: () => { ui.options = null; ui.pick = -1; nvRedraw(); } }, '✏️ 改我的台詞')),
+      draft);
+  }
+  const unsent = s.story.filter(p => !p.sent).length;
+  return h('div', {},
+    warn.length ? h('div', { class: 'nv-adv' }, warn.map(w => h('div', {}, '⚠ ' + w))) : null,
+    h('div', { class: 'nv-name', style: 'margin-top:8px' }, '前情'),
+    scene,
+    stage,
+    s.gasUrl && unsent ? h('button', { class: 'btn block', type: 'button', style: 'margin-top:12px', disabled: busy,
+      onclick: () => nvRun('送到 Google 文件…', async () => { const k = await nvPush(); toast(`已補送 ${k} 段到 Google 文件`); }) }, `有 ${unsent} 段還沒送到 Google 文件，按這裡補送`) : null);
+}
+
+function nvAsk() {
+  const ui = NV.ui, input = ui.input.trim();
+  if (!input) return toast('先寫下主角說什麼、做什麼');
+  nvRun('Gemini 正在想其他角色的反應…', async () => {
+    const d = nvParseJson(await nvGemini(nvTurnPrompt(input), true));
+    const opts = (Array.isArray(d.options) ? d.options : []).filter(o => o && o.text).slice(0, 5)
+      .map(o => ({ kind: String(o.kind || '角色反應'), title: String(o.title || '').slice(0, 20) || '（未命名）', text: String(o.text).trim() }));
+    if (!opts.length) throw new Error('Gemini 沒有給出選項，請再按一次');
+    ui.options = opts; ui.advice = String(d.advice || '').trim(); ui.pick = -1; ui.draft = '';
+  });
+}
+function nvPolish() {
+  const ui = NV.ui, s = nvS();
+  if (!ui.draft.trim()) return;
+  nvRun('Gemini 潤稿中…', async () => {
+    ui.draft = await nvGemini(`請把下面這段小說草稿潤成通順、筆法一致的小說段落。
+規則：不要增刪情節、不要改變任何角色說的話的意思、不要加標題或說明，只輸出潤好的段落；繁體中文、台灣用語。主角是「${nvHero()}」，草稿裡的「我」如果指主角，請依前情的人稱寫法統一。
+
+【設定集】
+${s.bible.trim() || '（無）'}
+
+【前情】
+${nvContext().slice(-1200) || '（無）'}
+
+【草稿】
+${ui.draft.trim()}`, false);
+  });
+}
+function nvCommit() {
+  const ui = NV.ui, s = nvS(), text = ui.draft.trim();
+  if (!text) return toast('這一段是空的');
+  if (nvTickets() < 1) return toast(`再答 ${nvToNext()} 題才能寫下一段`);
+  nvRun('寫入小說…', async () => {
+    s.story.push({ t: Date.now(), text, sent: false });
+    s.used++;
+    nvSave();
+    Object.assign(ui, { input: '', options: null, advice: '', pick: -1, draft: '' });
+    if (!s.gasUrl) return toast('已存在這台裝置（還沒連 Google 文件）');
+    await nvPush();
+    toast('✔ 已寫入 Google 文件');
+  });
+}
+
+function nvTabBible() {
+  const s = nvS(), busy = !!NV.ui.busy;
+  return h('div', {},
+    h('div', { class: 'card' },
+      h('h2', {}, '主角（你扮演的角色）'),
+      h('input', { class: 'nv-in', type: 'text', value: s.hero, placeholder: '主角的名字', oninput: e => { s.hero = e.target.value; nvSave(); } })),
+    h('div', { class: 'card' },
+      h('h2', {}, '設定集'),
+      h('div', { class: 'sub' }, '世界觀、每個角色的性格、說話方式、彼此的關係、目前的處境。Gemini 會照這裡寫其他角色的反應，寫得越具體越不會走樣。'),
+      h('textarea', { class: 'nv-ta', rows: 14, style: 'margin-top:8px', placeholder: '【世界觀】\n……\n\n【角色】\n・阿澈（主角）：\n・小語：嘴硬心軟，生氣時反而會笑……\n\n【目前劇情】\n……', oninput: e => { s.bible = e.target.value; nvSave(); } }, s.bible),
+      h('div', { class: 'hint' }, '打字就會自動儲存。'),
+      h('button', { class: 'btn pri block', type: 'button', style: 'margin-top:8px', disabled: busy, onclick: () => {
+        if (!s.bible.trim()) return toast('先寫一點設定再請 Gemini 看');
+        nvRun('Gemini 正在讀設定集…', async () => {
+          s.bibleNote = await nvGemini(`下面是一部小說的設定集，使用者之後要扮演主角「${nvHero()}」，由你依設定集扮演其他角色。請用繁體中文（台灣用語）、純文字條列回覆，不要用 Markdown 符號：
+一、你理解到的每個角色性格（每人一行，讓作者確認你有沒有讀對）。
+二、設定不夠清楚、演的時候容易走樣的地方，用問句列出來請作者補充（最多 6 點）。
+三、設定之間互相矛盾的地方（沒有就寫「沒有發現」）。
+
+【設定集】
+${s.bible.trim()}`, false);
+          nvSave();
+        });
+      } }, '請 Gemini 確認角色性格'),
+      s.bibleNote ? h('div', { class: 'nv-adv' }, s.bibleNote) : null));
+}
+
+function nvTabBook() {
+  const s = nvS(), all = s.story.map(p => p.text).join('\n\n');
+  return h('div', {},
+    h('div', { class: 'card' },
+      h('div', { class: 'row between' },
+        h('h2', { style: 'margin:0' }, `在這裡寫的 ${s.story.length} 段`),
+        h('button', { class: 'btn small', type: 'button', disabled: !s.story.length, onclick: () => nvCopy(all, '已複製全文') }, '複製全文')),
+      h('div', { class: 'sub' }, '完整的小說以 Google 文件為準，這裡是這台裝置寫入的紀錄。'),
+      s.story.length ? s.story.slice().reverse().map(p => h('div', { class: 'nv-p' },
+        h('div', { class: 'sub' }, new Date(p.t).toLocaleString('zh-TW', { hour12: false }) + (p.sent ? '　✔ 已在 Google 文件' : '　尚未送出')),
+        p.text)) : h('div', { class: 'hint' }, '還沒有內容。')));
+}
+
+function nvTabConn() {
+  const s = nvS(), busy = !!NV.ui.busy;
+  const modelSel = s.models.length
+    ? h('select', { style: 'width:100%', onchange: e => { s.model = e.target.value; nvSave(); } }, s.models.map(m => h('option', { value: m, selected: m === s.model }, m)))
+    : h('input', { class: 'nv-in', type: 'text', value: s.model, oninput: e => { s.model = e.target.value.trim(); nvSave(); } });
+  return h('div', {},
+    h('div', { class: 'card' },
+      h('h2', {}, 'Gemini'),
+      h('ol', { class: 'nv-steps' },
+        h('li', {}, '到 ', h('a', { href: 'https://aistudio.google.com/apikey', target: '_blank', rel: 'noopener' }, 'Google AI Studio'), ' 用 Google 帳號登入，按「建立 API 金鑰」。'),
+        h('li', {}, '把金鑰貼在下面（只存在這台裝置的瀏覽器，不會上傳到別的地方）。')),
+      h('input', { class: 'nv-in', type: 'password', value: s.apiKey, placeholder: 'Gemini API 金鑰', autocomplete: 'off', oninput: e => { s.apiKey = e.target.value.trim(); nvSave(); } }),
+      h('div', { class: 'hint' }, '使用的模型'),
+      modelSel,
+      h('button', { class: 'btn block', type: 'button', style: 'margin-top:8px', disabled: busy,
+        onclick: () => nvRun('測試 Gemini 連線…', async () => { const l = await nvListModels(); toast(`✔ 金鑰可以用，找到 ${l.length} 個模型，目前使用 ${nvS().model}`); }) }, '測試金鑰並列出可用模型')),
+    h('div', { class: 'card' },
+      h('h2', {}, 'Google 文件（自動把段落加到最後面）'),
+      h('ol', { class: 'nv-steps' },
+        h('li', {}, '打開你的小說 Google 文件，上方選單「擴充功能」→「Apps Script」。'),
+        h('li', {}, '把編輯器裡原本的內容全部刪掉，貼上下面的程式碼，按儲存（磁片圖示）。'),
+        h('li', {}, '右上角「部署」→「新增部署作業」→ 類型選「網頁應用程式」；執行身分選「我」，誰可以存取選「所有人」→「部署」，照畫面完成授權。'),
+        h('li', {}, '複製畫面上的「網頁應用程式網址」，貼到下面，按「測試連線」。')),
+      h('div', { class: 'nv-code' }, nvScript()),
+      h('button', { class: 'btn block', type: 'button', style: 'margin-top:8px', onclick: () => nvCopy(nvScript(), '已複製程式碼，到 Apps Script 貼上') }, '複製程式碼'),
+      h('div', { class: 'hint' }, '程式碼裡的密語是這台裝置自動產生的；網址加密語都對才能寫入，請不要把網址貼給別人。換一台裝置要用同一份文件時，把那台的密語改成一樣：'),
+      h('input', { class: 'nv-in', type: 'text', value: s.token, 'aria-label': '密語', oninput: e => { s.token = e.target.value.trim(); nvSave(); } }),
+      h('div', { class: 'hint' }, '網頁應用程式網址'),
+      h('input', { class: 'nv-in', type: 'url', value: s.gasUrl, placeholder: 'https://script.google.com/macros/s/…/exec', oninput: e => { s.gasUrl = e.target.value.trim(); nvSave(); } }),
+      h('button', { class: 'btn block', type: 'button', style: 'margin-top:8px', disabled: busy,
+        onclick: () => nvRun('讀取 Google 文件…', async () => {
+          const d = await nvGas({ action: 'tail', n: 3000 });
+          s.docTail = String(d.text || ''); s.tailAt = s.story.length; nvSave();
+          toast(`✔ 連線成功，文件目前約 ${d.length} 字，已讀取結尾當作前情`);
+        }) }, '測試連線（順便讀取文件結尾當前情）'),
+      h('div', { class: 'hint' }, '如果你有在 Google 文件裡直接改過小說，回來按一次上面的按鈕，Gemini 才會接到最新的內容。')));
+}
+
+</script>
+<script>
+'use strict';
 
 /* ============================================================
  * 小工具
@@ -6676,6 +7096,7 @@ function record(q, ok) {
   const daily = store.get(K('daily'), {}), day = dateStr();
   daily[day] = (daily[day] || 0) + 1;
   store.set(K('daily'), daily);
+  nvOnAnswer();   // 小說模式：每答 5 題解鎖寫一段（novel.js）
   syncSoon();
 }
 
@@ -7128,7 +7549,7 @@ function go(screen, keepScroll) {
   S.screen = screen;
   if (screen === 'home' || screen === 'result') S.study = null;
   if (screen !== 'quiz' || !keepScroll) stopSpeak();   // 換題或離開作答畫面就停止念題
-  const view = { home: viewHome, study: viewStudy, quiz: viewQuiz, result: viewResult, update: viewUpdate, newbank: viewNewBank, cheat: viewCheat }[screen];
+  const view = { home: viewHome, study: viewStudy, quiz: viewQuiz, result: viewResult, update: viewUpdate, newbank: viewNewBank, cheat: viewCheat, novel: viewNovel }[screen];
   $app.replaceChildren(view());
   if (!keepScroll) window.scrollTo(0, 0);
   if (screen === 'quiz') {
@@ -7440,6 +7861,7 @@ function viewHome() {
     bankCard(),
     installCard(),
     taskCard(),
+    novelCard(),
     reviewCard(),
     cheatCard(),
     resume,
@@ -7957,6 +8379,7 @@ function viewResult() {
       r.from === 'set' ? h('button', { class: 'btn pri grow', type: 'button', onclick: () => go('study') }, `下一組（第 ${setNo()} 組）`) : null,
       h('button', { class: r.from === 'set' ? 'btn grow' : 'btn pri grow', type: 'button', disabled: bad.length === 0, onclick: () => startSession(shuffle(bad.map(x => x.q.id)), r.mode, 'wrong') }, `重做答錯的（${bad.length}）`),
       h('button', { class: 'btn grow', type: 'button', onclick: () => go('home') }, '回首頁')),
+    novelResultBtn(),
     r.from === 'mock' ? unitBreakdown(items) : null,
     h('div', { class: 'card' },
       h('div', { class: 'row between', style: 'margin-bottom:6px' }, h('h2', { style: 'margin:0' }, '題目檢討'), toggle),
