@@ -6386,6 +6386,7 @@ const NV = {
   KEY: 'novel.state',
   PER: 5,                         // 每答幾題解鎖一段
   CTX: 30000,                     // 每次給 Gemini 看的前情原文字數（更早的用劇情提要）
+  SHOW: 800,                      // 寫作分頁「接續處」顯示（可修改）全文最後幾個字
   MAX_DOC: 200000,                // 匯入既有內容最多保留幾個字（從結尾算）
   DEFAULT_MODEL: 'gemini-2.5-flash',
   cache: null,
@@ -6661,7 +6662,8 @@ function nvStyle() {
   if (document.getElementById('nvStyle')) return;
   document.head.append(h('style', { id: 'nvStyle' }, `
 .nv-scene{background:#10162b;color:#eef1ff;border:3px double #8fa4ff;border-radius:10px;padding:12px 14px;white-space:pre-wrap;word-break:break-word;max-height:38vh;overflow:auto;line-height:1.8}
-.nv-scene .old{opacity:.6}
+.nv-edit{display:block;width:100%;font:inherit;line-height:1.8;resize:vertical;max-height:none}
+.nv-edit:focus{outline:0;border-color:#fff}
 .nv-name{display:inline-block;background:#8fa4ff;color:#10162b;font-weight:700;padding:2px 12px;border-radius:8px 8px 0 0;margin-top:14px}
 .nv-ta{width:100%;font:inherit;line-height:1.7;padding:10px;border:2px solid var(--line);border-radius:10px;background:var(--card);color:inherit;resize:vertical}
 .nv-ta:focus{border-color:var(--pri);outline:0}
@@ -6720,9 +6722,14 @@ function nvTabWrite() {
   const s = nvS(), ui = NV.ui, n = nvTickets(), busy = !!ui.busy;
   // 前情＝「我的小說」分頁的劇情提要（有的話）；接續處＝全文（匯入的內容＋之後寫入的段落）的結尾
   const full = nvFullText(), syn = nvEarlier();
-  const synBox = syn ? h('div', { class: 'nv-scene', style: 'max-height:30vh' }, syn) : null;
-  const scene = h('div', { class: 'nv-scene', style: syn ? 'max-height:30vh' : '' },
-    full ? (full.length > 800 ? '……' : '') + full.slice(-800) : '故事還沒開始。寫下主角的第一步吧。');
+  // 兩個框都可以直接修改、複製、貼上：提要改了就存；接續處改了（或整段貼上新的）就取代全文最後這一截，之後 Gemini 接著它寫
+  const synBox = syn ? h('textarea', { class: 'nv-scene nv-edit', rows: 8, oninput: e => { s.synopsis = e.target.value; nvSave(); } }, syn) : null;
+  const tail = full.slice(-NV.SHOW), head = full.slice(0, full.length - tail.length);
+  const scene = h('textarea', { class: 'nv-scene nv-edit', rows: 9, placeholder: '故事還沒開始。可以把前面寫好的結尾貼在這裡，或直接在下面寫第一段。',
+    oninput: e => {
+      const v = e.target.value;
+      s.docTail = (head + v).slice(-NV.MAX_DOC); s.tailAt = s.story.length; nvSave();
+    } }, tail);
   setTimeout(() => { scene.scrollTop = scene.scrollHeight; }, 0);
 
   const warn = [
@@ -6785,9 +6792,14 @@ function nvTabWrite() {
     warn.length ? h('div', { class: 'nv-adv' }, warn.map(w => h('div', {}, '⚠ ' + w))) : null,
     synBox ? h('div', { class: 'nv-name', style: 'margin-top:8px' }, '前情（劇情提要）') : null,
     synBox,
-    synBox ? h('div', { class: 'hint', style: 'margin-top:4px' }, '提要在「我的小說」分頁可以修改或重新整理。') : null,
+    synBox ? h('div', { class: 'row between', style: 'margin-top:4px' },
+      h('span', { class: 'hint' }, '可以直接修改，改了自動儲存。'),
+      h('button', { class: 'btn small', type: 'button', onclick: () => nvCopy(synBox.value, '已複製劇情提要') }, '📋 複製')) : null,
     h('div', { class: 'nv-name', style: 'margin-top:8px' }, synBox ? '接續處（目前寫到這裡）' : '前情'),
     scene,
+    h('div', { class: 'row between', style: 'margin-top:4px' },
+      h('span', { class: 'hint' }, `這是全文最後 ${NV.SHOW} 字，可以直接修改或貼上，改了自動儲存；Gemini 會接著這裡寫。這裡的修改不會改到 Google 文件。`),
+      h('button', { class: 'btn small', type: 'button', onclick: () => nvCopy(scene.value, '已複製') }, '📋 複製')),
     !s.docTail ? h('button', { class: 'btn small', type: 'button', style: 'margin-top:6px', onclick: () => { ui.tab = 'book'; go('novel'); } }, '📥 前面已經寫好了？匯入後讓 Gemini 接著寫') : null,
     stage,
     s.gasUrl && unsent ? h('button', { class: 'btn block', type: 'button', style: 'margin-top:12px', disabled: busy,
