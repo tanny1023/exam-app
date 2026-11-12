@@ -7864,6 +7864,21 @@ function startSession(ids, mode, from, task, limit) {
   go('quiz');
 }
 
+/* ---- 今日進度條：今天做了幾組、離每日目標還差幾組幾題、大約還要多久（首頁卡片與預習畫面最上面共用） ---- */
+function todayBar() {
+  const goalSets = S.settings.dailySets || 20, goalQ = goalSets * SET_SIZE;
+  const doneQ = store.get(K('daily'), {})[dateStr()] || 0;          // 今天答的題數（新題＋複習都算）
+  const leftQ = Math.max(0, goalQ - doneQ), leftSets = Math.ceil(leftQ / SET_SIZE);
+  const pct = Math.min(100, Math.round(doneQ / goalQ * 100)), done = leftQ === 0;
+  const color = done ? '#16a34a' : '#ea580c';
+  return h('div', { class: 'today' },
+    h('div', { class: 'row between' },
+      h('span', {}, '今日進度'),
+      h('b', { style: `color:${color}` }, done ? `今天的 ${goalSets} 組達標了 ✔` : `還差 ${leftSets} 組（${leftQ} 題），約還要 ${setMin(leftSets)}`)),
+    h('div', { class: 'bar', style: 'height:10px;border-radius:5px;margin:6px 0 0' }, h('i', { style: `width:${pct}%;background:${color}` })),
+    h('div', { class: 'sub' }, `今天已做 ${Math.floor(doneQ / SET_SIZE)} / ${goalSets} 組（${doneQ} / ${goalQ} 題，${pct}%）${done && doneQ > goalQ ? `，超過目標 ${doneQ - goalQ} 題` : ''}`));
+}
+
 /* ---- 首頁最上面的進度卡片：整體進度，還剩幾組、幾題沒做 ---- */
 function taskCard() {
   const t = taskInfo(), pct = Math.min(100, Math.round(t.seenCount / t.total * 100));
@@ -7885,6 +7900,7 @@ function taskCard() {
     h('div', { class: 'row between' },
       h('div', { class: 'big' }, dayText),
       h('div', { class: 'streak' }, `今天 ${todaySets} / ${goalSets} 組（約 ${setMin(goalSets)}）${todaySets >= goalSets ? ' ✔' : ''}`)),
+    h('div', { style: 'margin-top:12px' }, todayBar()),
     h('div', { style: 'margin-top:12px' },
       h('div', { class: 'row between' }, h('span', {}, '整體進度'), h('b', {}, t.unseen === 0 ? '全部都做過一輪了 🎉' : `還剩 ${t.groupsLeft} 組（${t.unseen} 題）還沒做`)),
       h('div', { class: 'bar', style: 'margin:6px 0 0' }, h('i', { style: `width:${pct}%` })),
@@ -7952,6 +7968,7 @@ function viewStudy() {
       h('button', { class: 'btn small', type: 'button', onclick: () => go('home') }, '‹ 返回'),
       h('b', {}, rv ? '複習' : `第 ${no} 組　預習`),
       HAS_TTS ? h('button', { class: 'btn small', type: 'button', id: 'speakBtn', 'data-idle': '🔊 念給我聽', onclick: () => (S.speaking || S.paused) ? stopSpeak() : readAll() }, '🔊 念給我聽') : h('span', { style: 'width:64px' })),
+    h('div', { class: 'card', style: 'margin-top:10px' }, todayBar()),
     h('div', { class: 'hint', style: 'margin:8px 0 0' }, `先把這 ${set.ids.length} 題連答案看（或聽）一遍，準備好再按下面的按鈕，會考同樣這 ${set.ids.length} 題。`),
     cards,
     h('div', { class: 'nav' },
