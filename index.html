@@ -7321,7 +7321,7 @@ const Q = {};      // id → 題目
  * 程式裡一律用 K('seen') 取「目前題庫」的鍵。
  * ============================================================ */
 const MAIN_ID = 'main', MAIN_NAME = '品管班（土建）題庫', DEFAULT_EXAM_DATE = '2026-12-05';
-const BANK_NAMES = ['seen', 'daily', 'stats', 'wrong', 'wrongT', 'mine', 'alias', 'session', 'set', 'bank'];
+const BANK_NAMES = ['seen', 'daily', 'studySec', 'stats', 'wrong', 'wrongT', 'mine', 'alias', 'session', 'set', 'bank'];
 const PER_BANK_SETTINGS = ['examDate', 'dailySets'];   // 這兩項存在題庫 meta，不寫進全域設定
 let ACTIVE = MAIN_ID;   // 目前題庫 id
 let BANKS = [];         // 題庫 meta（含已刪除的墓碑）
@@ -7841,6 +7841,7 @@ function exportExcel() {
  * 畫面
  * ============================================================ */
 function go(screen, keepScroll) {
+  if (S.screen === 'study' && screen !== 'study') studyFlush();   // 離開預習畫面：把預習時間存起來
   nvOnGo(screen);   // 小說模式：考完沒寫就離開結果頁，這次的寫作資格作廢（novel.js）
   S.screen = screen;
   if (screen === 'home' || screen === 'result') S.study = null;
@@ -7876,7 +7877,48 @@ function todayBar() {
       h('span', {}, '今日進度'),
       h('b', { style: `color:${color}` }, done ? `今天的 ${goalSets} 組達標了 ✔` : `還差 ${leftSets} 組（${leftQ} 題），約還要 ${setMin(leftSets)}`)),
     h('div', { class: 'bar', style: 'height:10px;border-radius:5px;margin:6px 0 0' }, h('i', { style: `width:${pct}%;background:${color}` })),
-    h('div', { class: 'sub' }, `今天已做 ${Math.floor(doneQ / SET_SIZE)} / ${goalSets} 組（${doneQ} / ${goalQ} 題，${pct}%）${done && doneQ > goalQ ? `，超過目標 ${doneQ - goalQ} 題` : ''}`));
+    h('div', { class: 'sub' }, `今天已做 ${Math.floor(doneQ / SET_SIZE)} / ${goalSets} 組（${doneQ} / ${goalQ} 題，${pct}%）${done && doneQ > goalQ ? `，超過目標 ${doneQ - goalQ} 題` : ''}`),
+    h('div', { class: 'sub', id: 'studyToday' }, studyTodayText()));
+}
+
+/* ---- 預習計時：只算停在預習畫面的時間（考試不算）；每天累計存在 K('studySec')＝{ 日期: 秒數 } ---- */
+const STUDY = { key: '', sec: 0, last: Date.now(), dirty: 0, IDLE: 180 };   // key＝這一組的題號；sec＝這一組已經預習幾秒；IDLE 秒沒動作就暫停
+const fmtLong = sec => sec >= 3600 ? `${Math.floor(sec / 3600)} 小時 ${Math.floor(sec % 3600 / 60)} 分` : fmtDur(sec);
+const studySecOf = day => (store.get(K('studySec'), {})[day] || 0) + (day === dateStr() ? STUDY.dirty : 0);
+function studyTodayText() {
+  const sec = studySecOf(dateStr()), sets = Math.floor((store.get(K('daily'), {})[dateStr()] || 0) / SET_SIZE);
+  return `⏱ 今天預習累計 ${fmtLong(sec)}${sets > 0 && sec > 0 ? `（平均每組約 ${fmtDur(Math.round(sec / sets))}）` : ''}`;
+}
+function studyFlush() {   // 把還沒存的秒數寫進今天的紀錄
+  if (!STUDY.dirty) return;
+  const m = store.get(K('studySec'), {}), day = dateStr();
+  m[day] = (m[day] || 0) + STUDY.dirty; STUDY.dirty = 0;
+  store.set(K('studySec'), m);
+  syncSoon();
+}
+const studyIdle = () => !S.speaking && Date.now() - STUDY.last > STUDY.IDLE * 1000;
+['pointerdown', 'keydown', 'scroll', 'touchstart', 'wheel'].forEach(ev => addEventListener(ev, () => { STUDY.last = Date.now(); }, { passive: true, capture: true }));
+setInterval(() => {
+  if (S.screen !== 'study' || document.hidden) return;
+  const c = document.getElementById('studyClock');
+  if (studyIdle()) { if (c) c.textContent = fmtClock(STUDY.sec) + '（已暫停：3 分鐘沒動作，動一下就繼續）'; return; }
+  STUDY.sec++; STUDY.dirty++;
+  if (c) c.textContent = fmtClock(STUDY.sec);
+  const t = document.getElementById('studyToday');
+  if (t) t.textContent = studyTodayText();
+  if (STUDY.dirty >= 5) studyFlush();
+}, 1000);
+addEventListener('pagehide', studyFlush);
+// 最近幾天的念書紀錄（首頁進度卡片裡，點開才看）
+function studyLog() {
+  const sec = store.get(K('studySec'), {}), daily = store.get(K('daily'), {});
+  const days = [...new Set([...Object.keys(sec), ...Object.keys(daily)])].filter(d => (sec[d] || 0) > 0 || (daily[d] || 0) > 0).sort().reverse().slice(0, 14);
+  if (!days.length) return null;
+  return h('details', { style: 'margin-top:10px' },
+    h('summary', { class: 'hint', style: 'cursor:pointer;margin:0' }, '📅 每天念書紀錄（最近 14 天有念的日子）'),
+    days.map(d => h('div', { class: 'row between rv' },
+      h('span', { style: 'font-size:.95rem' }, d + (d === dateStr() ? '（今天）' : '')),
+      h('span', { style: 'font-size:.95rem' }, `預習 ${fmtLong(studySecOf(d))}　${Math.floor((daily[d] || 0) / SET_SIZE)} 組（${daily[d] || 0} 題）`))));
 }
 
 /* ---- 首頁最上面的進度卡片：整體進度，還剩幾組、幾題沒做 ---- */
@@ -7910,6 +7952,7 @@ function taskCard() {
     h('div', { class: 'row', style: 'margin-top:10px;flex-wrap:wrap' }, h('span', { class: 'hint', style: 'margin:0' }, '考試日期'), dateInput,
       h('span', { class: 'hint', style: 'margin:0 0 0 8px' }, '每日目標'), goalSel,
       h('span', { class: 'hint', style: 'margin:0 0 0 8px' }, '每組約'), minSel),
+    studyLog(),
     planBlock());
 }
 
@@ -7954,6 +7997,9 @@ function viewStudy() {
   const rv = S.study;   // 從「做過的單元」進來的複習預習；沒有就是今天這一組
   const set = rv ? { ids: rv.ids } : curSet(), no = setNo();
   const cards = set.ids.map((id, i) => studyCard(Q[id], i, set.ids.length));
+  const sk = set.ids.join(',');
+  if (STUDY.key !== sk) { STUDY.key = sk; STUDY.sec = 0; }   // 換了一組才從 0 開始；同一組中途離開再回來接著算
+  STUDY.last = Date.now();
   // 一題一題念：題號、題目、答案（以上皆是會把每個選項念出來）、記憶法
   const readAll = () => speakItems(set.ids.flatMap((id, i) => {
     const q = Q[id], key = 'k' + i, mn = mnemoOf(q);
@@ -7968,13 +8014,18 @@ function viewStudy() {
       h('button', { class: 'btn small', type: 'button', onclick: () => go('home') }, '‹ 返回'),
       h('b', {}, rv ? '複習' : `第 ${no} 組　預習`),
       HAS_TTS ? h('button', { class: 'btn small', type: 'button', id: 'speakBtn', 'data-idle': '🔊 念給我聽', onclick: () => (S.speaking || S.paused) ? stopSpeak() : readAll() }, '🔊 念給我聽') : h('span', { style: 'width:64px' })),
-    h('div', { class: 'card', style: 'margin-top:10px' }, todayBar()),
+    h('div', { class: 'card', style: 'margin-top:10px' }, todayBar(),
+      h('div', { class: 'row between', style: 'margin-top:8px;padding-top:8px;border-top:1px solid var(--line)' },
+        h('span', {}, `⏱ 這 ${set.ids.length} 題預習了`), h('b', { id: 'studyClock', style: 'font-variant-numeric:tabular-nums' }, fmtClock(STUDY.sec)))),
     h('div', { class: 'hint', style: 'margin:8px 0 0' }, `先把這 ${set.ids.length} 題連答案看（或聽）一遍，準備好再按下面的按鈕，會考同樣這 ${set.ids.length} 題。`),
     cards,
     h('div', { class: 'nav' },
       HAS_TTS ? h('button', { class: 'btn ctl', type: 'button', id: 'pauseBtn', disabled: true, onclick: togglePause }, '⏸ 暫停') : null,
       HAS_TTS ? h('button', { class: 'btn ctl', type: 'button', onclick: readAll }, '↺ 重新開始') : null,
-      h('button', { class: 'btn pri', type: 'button', style: 'min-height:52px;font-size:1.02rem', onclick: () => rv ? startSession(rv.ids, 'exam', 'review') : startExamSet() }, '我準備好了，開始考試')));
+      h('button', { class: 'btn pri', type: 'button', style: 'min-height:52px;font-size:1.02rem', onclick: () => {
+        toast(`⏱ 這 ${set.ids.length} 題預習花了 ${fmtDur(STUDY.sec)}`, 3000);
+        rv ? startSession(rv.ids, 'exam', 'review') : startExamSet();
+      } }, '我準備好了，開始考試')));
 }
 
 /* ---- 已預習的單元：預習過的題目，可以依單元再練習或再考 ---- */
@@ -8743,7 +8794,7 @@ const syncOn = () => !!(window.FIREBASE_CONFIG && window.FIREBASE_CONFIG.apiKey)
 // 自訂題庫的 Excel 內容（src）、共用設定。進行到一半的作答與這一組題目不同步。
 //   { v:2, t, banks:[meta], data:{ [id]:{ seen, daily, stats, wrong, wrongT, mine, alias, src?, srcT } }, settings }
 // src：題庫內容；null 表示用內建題庫（只有 main 會是 null）；srcT：src 最後更動的時間，合併時取較新的
-const BANK_DATA = ['seen', 'daily', 'stats', 'wrong', 'wrongT', 'mine', 'alias'];
+const BANK_DATA = ['seen', 'daily', 'studySec', 'stats', 'wrong', 'wrongT', 'mine', 'alias'];
 const dflt = n => n === 'wrong' ? [] : {};
 const stripPerBank = st => { const o = Object.assign({}, st); PER_BANK_SETTINGS.forEach(k => delete o[k]); return o; };
 
@@ -8779,9 +8830,10 @@ function normalizeState(x) {
 function mergeBank(a, b) {
   a = a || {}; b = b || {};
   const keys = (x, y) => new Set([...Object.keys(x || {}), ...Object.keys(y || {})]);
-  const out = { seen: {}, daily: {}, stats: {}, wrongT: {}, mine: {}, alias: Object.assign({}, b.alias, a.alias) };
+  const out = { seen: {}, daily: {}, studySec: {}, stats: {}, wrongT: {}, mine: {}, alias: Object.assign({}, b.alias, a.alias) };
   for (const k of keys(a.seen, b.seen)) out.seen[k] = Math.max((a.seen || {})[k] || 0, (b.seen || {})[k] || 0);
   for (const k of keys(a.daily, b.daily)) out.daily[k] = Math.max((a.daily || {})[k] || 0, (b.daily || {})[k] || 0);
+  for (const k of keys(a.studySec, b.studySec)) out.studySec[k] = Math.max((a.studySec || {})[k] || 0, (b.studySec || {})[k] || 0);
   for (const k of keys(a.stats, b.stats)) {
     const x = (a.stats || {})[k], y = (b.stats || {})[k];
     if (!x) out.stats[k] = y;
