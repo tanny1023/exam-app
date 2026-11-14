@@ -49,6 +49,8 @@ select{border:1px solid var(--line);background:var(--card);border-radius:10px;pa
 .seg button.on{background:var(--pri);color:var(--pri-fg);font-weight:600}
 .bar{height:6px;background:var(--line);border-radius:3px;overflow:hidden;margin:8px 0 12px}
 .bar i{display:block;height:100%;background:var(--pri)}
+.dots{display:flex;flex-wrap:wrap;gap:5px;margin:8px 0 4px}
+.dots i{display:block;width:12px;height:12px;border-radius:50%;border:2px solid;box-sizing:border-box;opacity:.95}
 .tag{display:inline-block;font-size:.8rem;color:var(--muted);margin-bottom:6px}
 .stem{white-space:pre-wrap;word-break:break-word;font-size:1.05rem;margin:0 0 12px}
 .opts{display:flex;flex-direction:column;gap:10px}
@@ -7877,7 +7879,9 @@ function todayBar() {
     h('div', { class: 'row between' },
       h('span', {}, '今日進度'),
       h('b', { style: `color:${color}` }, done ? `今天的 ${goalSets} 組達標了 ✔` : `還差 ${leftSets} 組（${leftQ} 題），約還要 ${setMin(leftSets)}`)),
-    h('div', { class: 'bar', style: 'height:10px;border-radius:5px;margin:6px 0 0' }, h('i', { style: `width:${pct}%;background:${color}` })),
+    // 一組一個小圓圈：考完的組是實心，還沒做的是空心（超過目標的組不另外加圈）
+    h('div', { class: 'dots', role: 'img', 'aria-label': `今天已做 ${Math.floor(doneQ / SET_SIZE)} / ${goalSets} 組` },
+      Array.from({ length: goalSets }, (_, i) => h('i', { style: i < Math.floor(doneQ / SET_SIZE) ? `background:${color};border-color:${color}` : `border-color:${color}` }))),
     h('div', { class: 'sub' }, `今天已做 ${Math.floor(doneQ / SET_SIZE)} / ${goalSets} 組（${doneQ} / ${goalQ} 題，${pct}%）${done && doneQ > goalQ ? `，超過目標 ${doneQ - goalQ} 題` : ''}`),
     h('div', { class: 'sub', id: 'studyToday' }, studyTodayText()));
 }
