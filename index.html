@@ -6409,9 +6409,30 @@ function nvS() {
 }
 function nvSave() { if (!store.set(NV.KEY, NV.cache)) toast('⚠ 儲存失敗（瀏覽器空間不足），請先到「我的小說」複製全文備份'); }
 // 寫作資格：完成一次測驗（全部作答並看到結果）的當下可以寫一段；只放在記憶體，沒寫就離開（回首頁、開別的畫面、重新整理）就算放棄
-const nvTickets = () => NV.pass ? 1 : 0;
+// 裝置模式：手機版沒有寫小說的機制，只有電腦版可以寫。每台裝置各存各的（exam.device，不跟雲端同步）；沒選過就依裝置猜：觸控螢幕或窄螢幕＝手機
+function nvDevice() {
+  const v = store.get('exam.device', '');
+  if (v === 'mobile' || v === 'desktop') return v;
+  try { return (matchMedia('(pointer:coarse)').matches || innerWidth < 768) ? 'mobile' : 'desktop'; } catch (e) { return 'desktop'; }
+}
+const nvEnabled = () => nvDevice() === 'desktop';
+function deviceBar() {   // 首頁最上面：手機版／電腦版切換
+  const cur = nvDevice();
+  return h('div', { class: 'card', style: 'padding:8px 10px' },
+    h('div', { class: 'row between' },
+      h('span', { class: 'hint', style: 'margin:0' }, '這台裝置是'),
+      h('div', { class: 'seg', style: 'width:200px' }, [['mobile', '📱 手機版'], ['desktop', '💻 電腦版']].map(([id, name]) =>
+        h('button', { type: 'button', class: cur === id ? 'on' : '', onclick: () => {
+          if (cur === id) return;
+          store.set('exam.device', id);
+          if (id === 'mobile') { NV.pass = false; nvResetWrite(); }
+          go('home', true);
+        } }, name)))),
+    h('div', { class: 'hint', style: 'margin:4px 0 0' }, cur === 'desktop' ? '電腦版：考完測驗可以寫小說。' : '手機版：專心做題目，沒有寫小說。'));
+}
+const nvTickets = () => (NV.pass && nvEnabled()) ? 1 : 0;
 const nvResetWrite = () => Object.assign(NV.ui, { input: '', options: null, advice: '', pick: -1, draft: '' });
-function nvOnExam(ok) { NV.pass = !!ok; nvResetWrite(); }       // 主程式考完（finishSession）時呼叫
+function nvOnExam(ok) { NV.pass = !!ok && nvEnabled(); nvResetWrite(); }       // 主程式考完（finishSession）時呼叫
 function nvOnGo(screen) {                                        // 主程式每次換畫面（go）時呼叫
   if (NV.pass && screen !== 'result' && screen !== 'novel') { NV.pass = false; nvResetWrite(); }
 }
@@ -6721,6 +6742,7 @@ function nvStyle() {
 
 /* ---- 首頁卡片 ---- */
 function novelCard() {
+  if (!nvEnabled()) return null;   // 手機版沒有寫小說
   const s = nvS();
   return h('div', { class: 'card' },
     h('h2', { style: 'margin:0' }, '✍️ 寫小說'),
@@ -6738,6 +6760,10 @@ function novelResultBtn() {
 /* ---- 小說畫面 ---- */
 function viewNovel() {
   nvStyle();
+  if (!nvEnabled()) return h('div', {},
+    h('button', { class: 'btn small', type: 'button', onclick: () => go('home') }, '‹ 回去做題目'),
+    h('div', { class: 'card', style: 'margin-top:10px' }, h('b', {}, '手機版沒有寫小說'),
+      h('div', { class: 'sub' }, '寫小說只在電腦版開放。要寫的話，回首頁最上面把「這台裝置是」切成電腦版。')));
   const ui = NV.ui, n = nvTickets();
   const tabs = [['write', '寫作'], ['bible', '設定集'], ['book', '我的小說'], ['conn', '連線設定']].filter(x => n > 0 || x[0] !== 'write');
   if (n < 1 && ui.tab === 'write') ui.tab = 'bible';   // 沒有寫作資格（還沒考試或已經寫過）就不顯示寫作分頁
@@ -8226,6 +8252,7 @@ function viewHome() {
       h('button', { class: 'btn', type: 'button', onclick: () => { if (confirm('放棄這份作答？')) { S.session = null; persistSession(); go('home'); } } }, '放棄'))) : null;
 
   return h('div', {},
+    deviceBar(),   // 手機版／電腦版（novel.js）：手機版沒有寫小說
     syncCard(),
     bankCard(),
     installCard(),
