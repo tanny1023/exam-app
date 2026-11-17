@@ -6780,6 +6780,14 @@ function viewNovel() {
     { write: nvTabWrite, bible: nvTabBible, book: nvTabBook, conn: nvTabConn }[ui.tab]());
 }
 
+// 小說的 Google 文件連結：按一下在新分頁打開，可以直接在文件裡閱讀、修改
+const nvDocOk = u => /^https:\/\/(docs|drive)\.google\.com\//.test(u || '');
+function nvDocLink() {
+  const s = nvS();
+  return nvDocOk(s.docUrl)
+    ? h('button', { class: 'btn small', type: 'button', onclick: () => window.open(s.docUrl, '_blank', 'noopener') }, '📄 打開小說 Google 文件')
+    : h('button', { class: 'btn small', type: 'button', onclick: () => { NV.ui.tab = 'conn'; go('novel'); } }, '📄 設定小說 Google 文件的連結');
+}
 function nvTabWrite() {
   const s = nvS(), ui = NV.ui, n = nvTickets(), busy = !!ui.busy;
   // 前情＝「我的小說」分頁的劇情提要（有的話）；接續處＝全文（匯入的內容＋之後寫入的段落）的結尾
@@ -6851,6 +6859,7 @@ function nvTabWrite() {
   }
   const unsent = s.story.filter(p => !p.sent).length;
   return h('div', {},
+    h('div', { class: 'row', style: 'margin-bottom:8px' }, nvDocLink(), h('span', { class: 'hint', style: 'margin:0' }, '直接到文件裡讀、改小說')),
     warn.length ? h('div', { class: 'nv-adv' }, warn.map(w => h('div', {}, '⚠ ' + w))) : null,
     synBox ? h('div', { class: 'nv-name', style: 'margin-top:8px' }, '前情（劇情提要）') : null,
     synBox,
@@ -7023,6 +7032,7 @@ function nvTabBook() {
   const s = nvS(), unsent = s.story.filter(p => !p.sent), all = unsent.map(p => p.text).join('\n\n'), ui = NV.ui, busy = !!ui.busy;
   const total = nvFullText().length, done = n => toast(`✔ 已匯入 ${n} 字${n > NV.MAX_DOC ? `（只保留最後 ${NV.MAX_DOC} 字）` : ''}，Gemini 會接著後面寫`, 5000);
   return h('div', {},
+    h('div', { class: 'row', style: 'margin-bottom:8px' }, nvDocLink()),
     h('div', { class: 'card' },
       h('h2', {}, '前面已經寫好的內容'),
       h('div', { class: 'sub' }, s.docTail
@@ -7100,6 +7110,8 @@ function nvTabConn() {
       h('button', { class: 'btn block', type: 'button', style: 'margin-top:8px', onclick: () => nvCopy(nvScript(), '已複製程式碼，到 Apps Script 貼上') }, '複製程式碼'),
       h('div', { class: 'hint' }, '程式碼裡的密語是這台裝置自動產生的；網址加密語都對才能寫入，請不要把網址貼給別人。換一台裝置要用同一份文件時，把那台的密語改成一樣：'),
       h('input', { class: 'nv-in', type: 'text', value: s.token, 'aria-label': '密語', oninput: e => { s.token = e.target.value.trim(); nvSave(); } }),
+      h('div', { class: 'hint' }, '小說 Google 文件的連結（打開文件，複製瀏覽器網址列的網址貼在這裡；寫作分頁和「我的小說」分頁的按鈕會連到它）'),
+      h('input', { class: 'nv-in', type: 'url', value: s.docUrl || '', placeholder: 'https://docs.google.com/document/d/…/edit', oninput: e => { s.docUrl = e.target.value.trim(); nvSave(); } }),
       h('div', { class: 'hint' }, '網頁應用程式網址'),
       h('input', { class: 'nv-in', type: 'url', value: s.gasUrl, placeholder: 'https://script.google.com/macros/s/…/exec', oninput: e => { s.gasUrl = e.target.value.trim(); nvSave(); } }),
       h('button', { class: 'btn block', type: 'button', style: 'margin-top:8px', disabled: busy,
@@ -7952,6 +7964,69 @@ function studyLog() {
       h('span', { style: 'font-size:.95rem' }, `預習 ${fmtLong(studySecOf(d))}　${Math.floor((daily[d] || 0) / SET_SIZE)} 組（${daily[d] || 0} 題）`))));
 }
 
+/* ---- 時間計劃：一天幾點到幾點念書，每個小時要做幾組（預設早上 6 點到晚上 10 點、共 60 組＝300 題，平均分配，每小時都可以自己改） ---- */
+const PLAN_UI = { open: false };
+function planHours(p) { const a = []; for (let hr = p.from; hr < p.to; hr++) a.push(hr); return a; }
+function planSpread(total, hours) {   // 把 total 組盡量平均分到每個小時（多的零頭分散開，不會全擠在前面）
+  const n = hours.length, sets = {};
+  hours.forEach((hr, i) => { sets[hr] = Math.floor((i + 1) * total / n) - Math.floor(i * total / n); });
+  return sets;
+}
+function planInit() {
+  if (S.settings.plan && S.settings.plan.sets) return S.settings.plan;
+  const p = { from: 6, to: 22, sets: {} };
+  S.settings.dailySets = 60;                 // 使用者 2026-11-17：每天至少 300 題（60 組）
+  p.sets = planSpread(60, planHours(p));
+  S.settings.plan = p; saveSettings();
+  return p;
+}
+const hh = n => String(n).padStart(2, '0') + ':00';
+function planInfo() {
+  const p = planInit(), hours = planHours(p), slots = hours.map(hr => +p.sets[hr] || 0), cum = [];
+  slots.reduce((a, v, i) => (cum[i] = a + v), 0);
+  return { p, hours, slots, cum, total: cum.length ? cum[cum.length - 1] : 0 };
+}
+const todaySetsDone = () => Math.floor((store.get(K('daily'), {})[dateStr()] || 0) / SET_SIZE);
+function planStatusText() {
+  const { p, slots, cum, total } = planInfo(), now = new Date(), t = now.getHours() + now.getMinutes() / 60, done = todaySetsDone();
+  if (!total) return '還沒排每個小時要做幾組';
+  if (t < p.from) return `${hh(p.from)} 開始，今天計劃 ${total} 組`;
+  if (t >= p.to) return done >= total ? `今天計劃的 ${total} 組做完了 ✔` : `計劃時間結束了：做了 ${done} / ${total} 組`;
+  const i = Math.floor(t) - p.from, expect = Math.round((i ? cum[i - 1] : 0) + slots[i] * (t - Math.floor(t))), diff = done - expect, need = Math.max(0, cum[i] - done);
+  return `${diff === 0 ? '剛好跟上計劃' : diff > 0 ? `超前 ${diff} 組` : `落後 ${-diff} 組`}；到 ${hh(Math.floor(t) + 1)} 累計要做 ${cum[i]} 組，${need ? `還差 ${need} 組` : '已經達標'}`;
+}
+setInterval(() => { const e = document.getElementById('planStatus'); if (e && S.screen === 'home') e.textContent = planStatusText(); }, 30000);
+function timePlanCard() {
+  const { p, hours, slots, cum, total } = planInfo(), goal = S.settings.dailySets || 20, nowH = new Date().getHours(), done = todaySetsDone();
+  const save = () => { saveSettings(); go('home', true); };
+  const box = 'border:1px solid var(--line);background:var(--card);color:inherit;border-radius:8px;padding:4px 6px;font:inherit;font-size:.9rem';
+  const mkSel = (from, to, cur, fn) => h('select', { style: box, onchange: e => fn(+e.target.value) },
+    Array.from({ length: to - from + 1 }, (_, k) => from + k).map(n => h('option', { value: n, selected: n === cur }, hh(n))));
+  const setRange = (f, t) => { p.from = f; p.to = Math.max(t, f + 1); p.sets = planSpread(goal, planHours(p)); save(); };
+  const det = h('details', { style: 'margin-top:8px' },
+    h('summary', { class: 'hint', style: 'cursor:pointer;margin:0' }, `每小時要做幾組（${hh(p.from)}～${hh(p.to)}，共 ${hours.length} 小時）`),
+    h('div', { class: 'row', style: 'flex-wrap:wrap;margin-top:8px' },
+      h('span', { class: 'hint', style: 'margin:0' }, '從'), mkSel(0, 22, p.from, v => setRange(v, p.to)),
+      h('span', { class: 'hint', style: 'margin:0' }, '到'), mkSel(1, 24, p.to, v => setRange(p.from, v)),
+      h('button', { class: 'btn small', type: 'button', onclick: () => { p.sets = planSpread(goal, hours); save(); } }, `平均分配 ${goal} 組`)),
+    hours.map((hr, i) => h('div', { class: 'row between rv', style: hr === nowH ? 'background:var(--selbg);border-radius:8px;padding:2px 6px' : 'padding:2px 6px' },
+      h('span', { style: 'font-size:.95rem;font-variant-numeric:tabular-nums' }, `${hh(hr)}–${hh(hr + 1)}${hr === nowH ? ' ◀ 現在' : ''}`),
+      h('span', { class: 'row', style: 'gap:6px' },
+        h('input', { type: 'number', min: 0, max: 30, value: slots[i], inputmode: 'numeric', 'aria-label': `${hh(hr)} 要做幾組`, style: box + ';width:60px;text-align:center',
+          onchange: e => { p.sets[hr] = Math.max(0, Math.min(30, Math.round(+e.target.value || 0))); save(); } }),
+        h('span', { style: 'font-size:.9rem' }, '組'),
+        h('span', { class: 'sub', style: 'margin:0;min-width:5.5em;text-align:right' }, `累計 ${cum[i]} ${cum[i] > 0 && done >= cum[i] ? '✔' : ''}`)))),
+    total !== goal ? h('div', { class: 'row between', style: 'margin-top:8px' },
+      h('span', { class: 'hint', style: 'margin:0' }, `計劃合計 ${total} 組，跟每日目標（${goal} 組）不一樣`),
+      h('button', { class: 'btn small', type: 'button', onclick: () => { S.settings.dailySets = Math.max(1, total); save(); } }, `每日目標改成 ${total} 組`)) : null);
+  det.open = PLAN_UI.open;
+  det.addEventListener('toggle', () => { PLAN_UI.open = det.open; });
+  return h('div', { class: 'card' },
+    h('div', { class: 'row between' }, h('h2', { style: 'margin:0' }, '⏰ 時間計劃'), h('b', {}, `${done} / ${total} 組`)),
+    h('div', { id: 'planStatus', style: 'margin-top:6px;font-weight:600' }, planStatusText()),
+    det);
+}
+
 /* ---- 首頁最上面的進度卡片：整體進度，還剩幾組、幾題沒做 ---- */
 function taskCard() {
   const t = taskInfo(), pct = Math.min(100, Math.round(t.seenCount / t.total * 100));
@@ -7964,7 +8039,7 @@ function taskCard() {
     go('home', true);
   });
   const goalSets = S.settings.dailySets || 20, todaySets = Math.floor((store.get(K('daily'), {})[dateStr()] || 0) / SET_SIZE);   // 每答 5 題算 1 組（新題＋複習都算）
-  const goalSel = h('select', { style: dateInput.style.cssText }, [5, 10, 15, 20, 25, 30, 40, 50].map(n => h('option', { value: n, selected: n === goalSets }, `${n} 組（約 ${setMin(n)}）`)));
+  const goalSel = h('select', { style: dateInput.style.cssText }, [...new Set([5, 10, 15, 20, 25, 30, 40, 50, 60, 70, 80, goalSets])].sort((a, b) => a - b).map(n => h('option', { value: n, selected: n === goalSets }, `${n} 組（約 ${setMin(n)}）`)));
   goalSel.addEventListener('change', () => { S.settings.dailySets = +goalSel.value; saveSettings(); go('home', true); });
   const minSel = h('select', { style: dateInput.style.cssText }, [0.5, 1, 1.5, 2, 3, 4, 5, 8, 10].map(n => h('option', { value: n, selected: n === minPerSet() }, `${n} 分鐘`)));
   minSel.addEventListener('change', () => { S.settings.minPerSet = +minSel.value; saveSettings(); go('home', true); });
@@ -8257,6 +8332,7 @@ function viewHome() {
     bankCard(),
     installCard(),
     taskCard(),
+    timePlanCard(),
     novelCard(),
     reviewCard(),
     cheatCard(),
